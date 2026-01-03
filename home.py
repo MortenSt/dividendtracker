@@ -19,6 +19,7 @@ def clean_currency(val):
     return 0.0
 
 def normalize_string(text):
+    """Aggressiv navnevask for sammenligning."""
     if not isinstance(text, str): return str(text)
     text = text.lower()
     suffixes = [r'\sasa$', r'\sas$', r'\sltd$', r'\scorp$', r'\sab$', r'\splc$', r'\sinc$', r'\sclass a$', r'\sa$']
@@ -141,16 +142,19 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
     if df_divs.empty: return df_portfolio, 0, [], []
 
-    unique_hist = df_divs['Verdipapir'].unique()
-    unique_port = df_portfolio['Verdipapir'].unique()
-    auto_matches = auto_match_names(unique_hist, unique_port)
-    
+    # 1. Bruk mappingen (Ordboken)
     def apply_mapping(name):
-        if name in mapping_dict: return mapping_dict[name]
-        if name in auto_matches: return auto_matches[name]
-        return name
+        return mapping_dict.get(name, name)
 
     df_divs['MappedName'] = df_divs['Verdipapir'].apply(apply_mapping)
+    
+    # 2. Auto-match mot portefølje for det som gjenstår
+    unique_hist_mapped = df_divs['MappedName'].unique()
+    unique_port = df_portfolio['Verdipapir'].unique()
+    auto_matches = auto_match_names(unique_hist_mapped, unique_port)
+    
+    # Oppdater mappingen med auto-matches
+    df_divs['FinalName'] = df_divs['MappedName'].apply(lambda x: auto_matches.get(x, x))
     
     max_date = df_divs['Dato'].max()
     cutoff_date = max_date - pd.DateOffset(days=380)
@@ -162,26 +166,22 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     est_map = {}
     freq_info = {}
     
-    grouped_all = df_divs.groupby('MappedName')
-    grouped_recent = df_recent.groupby('MappedName')['DPS'].sum().to_dict()
+    grouped_all = df_divs.groupby('FinalName')
+    grouped_recent = df_recent.groupby('FinalName')['DPS'].sum().to_dict()
 
     for name, group in grouped_all:
         ttm_val = grouped_recent.get(name, 0.0)
         freq_name, multiplier, is_volatile = detect_frequency_and_volatility(group)
         volatility_tag = " ⚠️" if is_volatile else ""
         
-        recent_group = df_recent[df_recent['MappedName'] == name]
+        recent_group = df_recent[df_recent['FinalName'] == name]
         avg_dps = recent_group['DPS'].mean() if not recent_group.empty else 0
         
         last_dps = 0
         if not group.empty:
             real_divs = group[group['Transaksjonstype'].isin(['UTBYTTE', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL'])]
-            if not real_divs.empty:
-                last_payment = real_divs.sort_values('Dato', ascending=False).iloc[0]
-                last_dps = last_payment['DPS']
-            else:
-                last_payment = group.sort_values('Dato', ascending=False).iloc[0]
-                last_dps = last_payment['DPS']
+            last_payment = real_divs.sort_values('Dato', ascending=False).iloc[0] if not real_divs.empty else group.sort_values('Dato', ascending=False).iloc[0]
+            last_dps = last_payment['DPS']
 
         if method == "ttm":
             est_map[name] = ttm_val
@@ -203,15 +203,24 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
     matched_names = []
     portfolio_names = df_portfolio['Verdipapir'].unique()
-    
-    history_names_mapped = set(df_divs['MappedName'].unique())
     port_set_norm = set([normalize_string(n) for n in portfolio_names])
     
+    # Identifiser orphans (De som fortsatt ikke matcher porteføljen etter auto-match)
+    # Dette er de vi vil at brukeren skal navngi pent
     orphans = []
-    for h_name in unique_hist:
-        mapped = apply_mapping(h_name)
-        if normalize_string(mapped) not in port_set_norm:
-            orphans.append(h_name)
+    
+    # Gå gjennom opprinnelige navn
+    for orig_name in df_history[df_history['Transaksjonstype'].isin(div_types)]['Verdipapir'].unique():
+        # Hvis det allerede er mappet manuelt, ignorer
+        if orig_name in mapping_dict: continue
+        
+        # Hvis det ble auto-mappet, ignorer
+        if orig_name in auto_matches: continue
+        
+        # Sjekk om normalisering treffer
+        norm = normalize_string(orig_name)
+        if norm not in port_set_norm:
+             orphans.append(orig_name)
 
     def get_estimate(row):
         p_name = row['Verdipapir']
@@ -238,7 +247,7 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     
     return df_portfolio, len(set(matched_names)), orphans, list(portfolio_names)
 
-def analyze_dividends(df):
+def analyze_dividends(df, mapping_dict):
     if 'Transaksjonstype' not in df.columns: return pd.DataFrame()
     div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG']
     reinvest = df[(df['Transaksjonstype'] == 'REINVESTERT UTBYTTE') & (df['Beløp_Clean'] > 0)].copy()
@@ -248,26 +257,23 @@ def analyze_dividends(df):
     df_divs = df[df['Transaksjonstype'].isin(div_types)].copy()
     if not reinvest.empty: df_divs = pd.concat([df_divs, reinvest])
     df_roc = df[df['Transaksjonstype'].isin(roc_types)].copy()
-    df_tax = df[df['Transaksjonstype'].isin(tax_types)].copy()
     
     df_divs['Type'] = 'Utbytte'
     df_divs.loc[df_divs['Transaksjonstype'] == 'TILBAKEBET. FOND AVG', 'Type'] = 'Returprovisjon'
     df_divs.loc[df_divs['Transaksjonstype'] == 'Utbetaling aksjeutlån', 'Type'] = 'Aksjeutlån'
     df_roc['Type'] = 'Tilbakebetaling'
     df_main = pd.concat([df_divs, df_roc])
+    
     if df_main.empty: return pd.DataFrame()
-
-    if 'Verifikationsnummer' in df_main.columns:
-        df_main['Key'] = df_main['Verifikationsnummer'].fillna('Unknown')
-        df_tax['Key'] = df_tax['Verifikationsnummer'].fillna('Unknown')
-        tax_map = df_tax.groupby('Key')['Beløp_Clean'].sum()
-        df_main['Kildeskatt'] = df_main['Key'].map(tax_map).fillna(0.0)
-    else: df_main['Kildeskatt'] = 0.0
+    
+    # BRUK MAPPINGEN HER OGSÅ
+    df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
 
     df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
-    df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
-    df_main = df_main[df_main['Netto_Mottatt'] > 0]
-    return df_main
+    # Forenklet skattelogikk for oversikt
+    df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] 
+    
+    return df_main[df_main['Netto_Mottatt'] > 0]
 
 # --- HOVEDAPPLIKASJON ---
 
@@ -296,18 +302,20 @@ with tab1:
         if not df_raw.empty:
             df_clean = process_transactions(df_raw)
             st.session_state['history_df'] = df_clean
-            df_result = analyze_dividends(df_clean)
             
-            if not df_result.empty:
-                years = sorted(df_result['År'].dropna().unique(), reverse=True)
+            # Bruk mappingen når vi analyserer
+            df_divs = analyze_dividends(df_clean, st.session_state['mapping'])
+            
+            if not df_divs.empty:
+                years = sorted(df_divs['År'].dropna().unique(), reverse=True)
                 if len(years) > 1:
-                    yearly_stats = df_result.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
+                    yearly_stats = df_divs.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
                     fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type',
                                        title="Utvikling år for år", text_auto='.2s')
                     st.plotly_chart(fig_trend, width="stretch")
 
                 selected_year = st.selectbox("Velg år", years)
-                df_year = df_result[df_result['År'] == selected_year]
+                df_year = df_divs[df_divs['År'] == selected_year]
                 
                 stats = df_year.groupby('Type')['Netto_Mottatt'].sum()
                 cols = st.columns(len(stats) + 1)
@@ -317,6 +325,7 @@ with tab1:
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
                 fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type', title=f"Per måned ({selected_year})", text_auto='.2s')
                 st.plotly_chart(fig, width="stretch")
+                
                 st.dataframe(df_year[['Dato', 'Verdipapir', 'Type', 'Netto_Mottatt', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
 
 # --- TAB 2 ---
@@ -343,7 +352,7 @@ with tab2:
             est_method = st.radio("Metode:", ["Smart (Siste annualisert)", "Konservativ (Snitt siste år)", "TTM (Sum 12 mnd)"], horizontal=True)
         mapping = {"Smart (Siste annualisert)": "smart", "Konservativ (Snitt siste år)": "avg", "TTM (Sum 12 mnd)": "ttm"}
         
-        # KJØR BEREGNING AUTOMATISK HVER GANG SIDEN LASTES
+        # KJØR BEREGNING
         if not st.session_state['history_df'].empty and df_port is not None:
              df_port, count, orphans, port_names = estimate_dividends_from_history(
                         st.session_state['history_df'], 
@@ -351,7 +360,6 @@ with tab2:
                         st.session_state['mapping'],
                         method=mapping[est_method]
                     )
-             # Oppdater state umiddelbart
              st.session_state['orphans'] = orphans
              st.session_state['port_names'] = port_names
 
@@ -359,32 +367,35 @@ with tab2:
             st.write("")
             st.write("")
             if not st.session_state['history_df'].empty:
-                if st.button("🤖 Oppdater beregning"):
-                    # Knappen trenger egentlig ikke gjøre noe annet enn å trigger rerun, siden koden over kjører uansett.
-                    # Men vi kan gi en hyggelig melding.
-                    if count > 0: st.success(f"Matchet {count} selskaper!")
-                    else: st.warning("Fant få/ingen matcher.")
-            else: st.info("Mangler historikk (Fane 1).")
+                st.button("🤖 Oppdater beregning") # Trigger rerun
 
-        # --- NAVNEKOBLEREN (Nå ligger den utenfor knappen, så den er alltid synlig) ---
+        # --- ORDBOKEN (Enkel Mapping) ---
         if st.session_state['orphans']:
-            st.warning(f"⚠️ Fant {len(st.session_state['orphans'])} transaksjoner som ikke matcher porteføljen. Koble dem her:")
-            with st.expander("🔗 Koble ukjente tickers til aksjer", expanded=True):
+            st.warning(f"⚠️ Fant {len(st.session_state['orphans'])} udefinerte navn i historikken. Gi dem et bedre navn her:")
+            
+            with st.expander("📝 Navnevask / Alias (Klikk for å åpne)", expanded=True):
                 c1, c2, c3 = st.columns([2, 2, 1])
-                with c1: selected_orphan = st.selectbox("Ukjent ticker", st.session_state['orphans'])
-                with c2: target_stock = st.selectbox("Tilhører aksje", sorted(st.session_state['port_names']))
+                with c1:
+                    selected_orphan = st.selectbox("Ticker / Navn i historikk", st.session_state['orphans'])
+                with c2:
+                    # Foreslå portefølje-navn hvis det finnes, ellers la stå tomt
+                    suggestions = sorted(st.session_state['port_names'])
+                    selected_target = st.selectbox("Velg fra portefølje... (valgfritt)", [""] + suggestions)
+                    
+                    custom_target = st.text_input("...eller skriv nytt navn:", value=selected_target if selected_target else selected_orphan)
+                    
                 with c3:
                     st.write("")
                     st.write("")
-                    if st.button("Lagre kobling"):
-                        st.session_state['mapping'][selected_orphan] = target_stock
-                        # Tving en rerun slik at koblingen trer i kraft umiddelbart
-                        st.rerun()
-                
+                    if st.button("Lagre navn"):
+                        if custom_target.strip():
+                            st.session_state['mapping'][selected_orphan] = custom_target.strip()
+                            st.rerun()
+
                 if st.session_state['mapping']:
-                    st.write("Dine aktive koblinger:")
+                    st.write("Dine navnebytter:")
                     st.json(st.session_state['mapping'])
-                    if st.button("Nullstill alle koblinger"):
+                    if st.button("Nullstill alle"):
                         st.session_state['mapping'] = {}
                         st.rerun()
 
@@ -411,20 +422,16 @@ with tab3:
     
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
-        df_divs = analyze_dividends(df_hist)
+        
+        # Bruk mappingen på hele analysen
+        df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
         
         if not df_divs.empty:
-            manual_map = st.session_state['mapping']
-            def get_clean_name(name):
-                if name in manual_map: return manual_map[name]
-                return name
-            
-            df_divs['CleanName'] = df_divs['Verdipapir'].apply(get_clean_name)
-            df_divs['NormKey'] = df_divs['CleanName'].apply(normalize_string)
-            
+            # Auto-normalisering for visning i toppliste (BWLPG = BW LPG)
+            df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
             key_to_display = {}
             for key, group in df_divs.groupby('NormKey'):
-                best_name = max(group['CleanName'].unique(), key=len)
+                best_name = max(group['Verdipapir'].unique(), key=len)
                 key_to_display[key] = best_name
             df_divs['DisplayName'] = df_divs['NormKey'].map(key_to_display)
             
@@ -441,7 +448,7 @@ with tab3:
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader("Grafisk oversikt")
-                fig = px.bar(top_list.head(20), x='Totalt Mottatt', y='Selskap', orientation='h', title=f"Topp 20 Utbytteaksjer ({filter_year})", text_auto='.2s')
+                fig = px.bar(top_list.head(20), x='Totalt Mottatt', y='Selskap', orientation='h', title=f"Topp 20 ({filter_year})", text_auto='.2s')
                 fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
                 st.plotly_chart(fig, width="stretch")
             with col2:
