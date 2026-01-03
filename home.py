@@ -81,8 +81,6 @@ def process_transactions(df):
     if 'Beløp' in df.columns: df['Beløp_Clean'] = df['Beløp'].apply(clean_currency)
     if 'Antall' in df.columns: df['Antall'] = df['Antall'].apply(clean_currency)
     df['Verdipapir'] = df.apply(smart_fill_name, axis=1)
-    
-    # Ikke normaliser her enda, vi vil se rådata i mappingen
     return df
 
 def process_portfolio(df):
@@ -134,10 +132,6 @@ def detect_frequency_and_volatility(df_stock):
     return freq, mult, is_volatile
 
 def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, method="smart"):
-    """
-    Kjernefunksjon for estimering.
-    mapping_dict: { 'MPCC': 'MPC Container Ships', ... }
-    """
     if df_history.empty or df_portfolio.empty: return df_portfolio, 0, [], []
 
     div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
@@ -145,21 +139,17 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     
     if df_divs.empty: return df_portfolio, 0, [], []
 
-    # 1. Bruk mappingen til å oppdatere navn i historikken
-    # Vi lager en kopi av 'Verdipapir' kalt 'MappedName'
+    # Mapping av navn
     def apply_mapping(name):
-        # Sjekk først direkte match
         if name in mapping_dict: return mapping_dict[name]
-        # Sjekk normalisert match (fallback)
         norm_name = normalize_string(name)
-        # Sjekk om noen nøkler i mapping_dict normaliserer til det samme
         for key, val in mapping_dict.items():
             if normalize_string(key) == norm_name: return val
         return name
 
     df_divs['MappedName'] = df_divs['Verdipapir'].apply(apply_mapping)
     
-    # 2. Dato-filter (380 dager)
+    # Dato-filter (380 dager)
     max_date = df_divs['Dato'].max()
     cutoff_date = max_date - pd.DateOffset(days=380)
     df_recent = df_divs[df_divs['Dato'] >= cutoff_date].copy()
@@ -170,7 +160,6 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     est_map = {}
     freq_info = {}
     
-    # Grupper på MappedName (slik at MPCC og MPC Container Ships slås sammen)
     grouped_all = df_divs.groupby('MappedName')
     grouped_recent = df_recent.groupby('MappedName')['DPS'].sum().to_dict()
 
@@ -205,16 +194,11 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
                 est_map[name] = ttm_val
                 freq_info[name] = "Uregelmessig (TTM)"
 
-    # 3. Map til porteføljen (Nå matcher vi direkte på navn siden vi har mappet historikken)
     matched_names = []
-    
-    # Normaliserte nøkler for porteføljen
     portfolio_names = df_portfolio['Verdipapir'].unique()
     
-    # Identifiser "Orphans" (Historikk-navn som ikke finnes i porteføljen)
-    # Dette er kandidater for manuell mapping
+    # Identifiser foreldreløse tickers
     history_names = set(df_divs['MappedName'].unique())
-    # Vi må bruke normalisering for å sjekke orphans skikkelig
     port_norm = set([normalize_string(n) for n in portfolio_names])
     
     orphans = []
@@ -224,12 +208,10 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
     def get_estimate(row):
         p_name = row['Verdipapir']
-        # Prøv direkte match
         if p_name in est_map:
             matched_names.append(p_name)
             return est_map[p_name]
         
-        # Prøv normalisert match
         p_norm = normalize_string(p_name)
         for est_name, val in est_map.items():
             if normalize_string(est_name) == p_norm:
@@ -288,7 +270,7 @@ def analyze_dividends(df):
 st.title("💰 Utbytte-dashboard")
 
 if 'history_df' not in st.session_state: st.session_state['history_df'] = pd.DataFrame()
-if 'mapping' not in st.session_state: st.session_state['mapping'] = {} # Lagre koblinger
+if 'mapping' not in st.session_state: st.session_state['mapping'] = {}
 
 st.sidebar.header("Innstillinger")
 konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
@@ -372,32 +354,41 @@ with tab2:
                     if count > 0: st.success(f"Matchet {count} selskaper!")
                     else: st.warning("Fant få/ingen matcher.")
                     
-                    # --- NAVNEKOBLEREN ---
-                    # Hvis vi har foreldreløse tickers (f.eks MPCC) og portefølje-selskaper
                     if orphans:
                         st.error(f"⚠️ Fant {len(orphans)} transaksjoner som ikke matcher porteføljen. Koble dem her:")
-                        
                         with st.expander("🔗 Koble ukjente tickers til aksjer"):
                             c1, c2, c3 = st.columns([2, 2, 1])
-                            with c1:
-                                selected_orphan = st.selectbox("Ukjent ticker (fra historikk)", orphans)
-                            with c2:
-                                # Foreslå portefølje-selskaper som ikke er mappet? Eller alle.
-                                target_stock = st.selectbox("Tilhører aksje (i portefølje)", sorted(port_names))
+                            with c1: selected_orphan = st.selectbox("Ukjent ticker", orphans)
+                            with c2: target_stock = st.selectbox("Tilhører aksje", sorted(port_names))
                             with c3:
                                 st.write("")
                                 st.write("")
                                 if st.button("Lagre kobling"):
                                     st.session_state['mapping'][selected_orphan] = target_stock
-                                    st.rerun() # Oppdater siden for å kjøre beregning på nytt
-                            
+                                    st.rerun()
                             if st.session_state['mapping']:
                                 st.write("Dine koblinger:")
                                 st.json(st.session_state['mapping'])
-
             else: st.info("Mangler historikk (Fane 1).")
 
         cols = [c for c in ['Verdipapir', 'Antall', 'GAV', 'Est. Utbytte', 'Info'] if c in df_port.columns]
+        
+        # --- HER VAR FEILEN ---
         column_config = {
             "GAV": st.column_config.NumberColumn(format="%.2f kr"),
-            "Est. Utbytte": st.
+            "Est. Utbytte": st.column_config.NumberColumn(format="%.2f kr", step=0.1),
+            "Info": st.column_config.TextColumn(disabled=True),
+        }
+        
+        edited_df = st.data_editor(df_port[cols], column_config=column_config, width="stretch")
+        
+        if 'Antall' in edited_df.columns and 'Est. Utbytte' in edited_df.columns:
+            edited_df['Sum utbytte'] = edited_df['Antall'] * edited_df['Est. Utbytte']
+            if 'GAV' in edited_df.columns:
+                edited_df['YoC %'] = edited_df.apply(lambda x: (x['Est. Utbytte']/x['GAV']*100) if x['GAV']>0 else 0, axis=1)
+                
+            total = edited_df['Sum utbytte'].sum()
+            st.metric("Estimert årlig inntekt", f"{total:,.0f} NOK")
+            
+            res_cols = [c for c in ['Verdipapir', 'Info', 'YoC %', 'Sum utbytte'] if c in edited_df.columns]
+            st.dataframe(edited_df[res_cols].style.format({'YoC %': '{:.2f} %', 'Sum utbytte': '{:.0f} kr'}), width="stretch")
