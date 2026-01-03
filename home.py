@@ -19,21 +19,12 @@ def clean_currency(val):
     return 0.0
 
 def normalize_string(text):
-    """
-    Aggressiv navnevask: Fjerner alt av mellomrom og spesialtegn.
-    Gjør at 'BW LPG' == 'BWLPG'.
-    """
     if not isinstance(text, str): return str(text)
     text = text.lower()
-    
-    # 1. Fjern suffixes først (mens vi fortsatt har mellomrom)
     suffixes = [r'\sasa$', r'\sas$', r'\sltd$', r'\scorp$', r'\sab$', r'\splc$', r'\sinc$', r'\sclass a$', r'\sa$']
     for suffix in suffixes:
         text = re.sub(suffix, '', text)
-        
-    # 2. Fjern ALT som ikke er bokstaver (a-z) eller tall (0-9). Inkludert mellomrom.
     text = re.sub(r'[^a-z0-9]', '', text)
-    
     return text
 
 def smart_fill_name(row):
@@ -101,14 +92,30 @@ def parse_clipboard_text(text):
     return pd.DataFrame(data)
 
 def detect_frequency_and_volatility(df_stock):
-    dates = df_stock['Dato'].dt.date.unique()
+    """
+    Analyserer datoene for å finne frekvens.
+    FIX: Ignorerer nå 'Utbetaling aksjeutlån' for frekvensberegningen.
+    """
+    # Filtrer ut kun EKTE utbytter for datoberegning
+    real_div_types = ['UTBYTTE', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL', 'REINVESTERT UTBYTTE']
+    
+    # Bruk bare rader som er faktiske utbytter
+    df_dates = df_stock[df_stock['Transaksjonstype'].isin(real_div_types)]
+    
+    # Fallback: Hvis vi KUN har aksjeutlån i historikken (ingen utbytter ennå), bruk alt
+    if df_dates.empty:
+        df_dates = df_stock
+
+    dates = df_dates['Dato'].dt.date.unique()
     dates.sort()
+    
     if len(dates) < 2: return "Ukjent", 0, False
     
     recent_dates = dates[-5:]
     diffs = []
     for i in range(1, len(recent_dates)):
         diffs.append((recent_dates[i] - recent_dates[i-1]).days)
+        
     avg_diff = sum(diffs) / len(diffs)
     
     if 20 <= avg_diff <= 45: freq, mult = "Månedlig", 12
@@ -117,33 +124,28 @@ def detect_frequency_and_volatility(df_stock):
     elif 330 <= avg_diff <= 400: freq, mult = "Årlig", 1
     else: freq, mult = "Uregelmessig", 0
 
+    # Volatilitet sjekkes fortsatt på ALT (inkludert utlån kan påvirke snittet, men la oss holde det enkelt)
     dps_series = df_stock.apply(lambda r: r['Beløp_Clean']/r['Antall'] if r['Antall']>0 else 0, axis=1)
     mean_dps = dps_series.mean()
     std_dev = dps_series.std()
+    
     is_volatile = False
     if mean_dps > 0 and (std_dev / mean_dps) > 0.2: is_volatile = True
+        
     return freq, mult, is_volatile
 
 def auto_match_names(history_names, portfolio_names):
-    """Prøver å matche navn automatisk med fuzzy logic."""
     matches = {}
-    # Nå er norm keys uten mellomrom (bwlpg)
     port_norm = {normalize_string(p): p for p in portfolio_names}
-    
     for h_name in history_names:
         h_norm = normalize_string(h_name)
-        
-        # 1. Eksakt match (aggressiv normalisering)
         if h_norm in port_norm:
             matches[h_name] = port_norm[h_norm]
             continue
-            
-        # 2. Inneholder (Sjekk om 'odfjell' er i 'odfjella')
         for p_norm_key, p_real in port_norm.items():
             if len(h_norm) > 3 and (h_norm in p_norm_key or p_norm_key in h_norm):
                  matches[h_name] = p_real
                  break
-                 
     return matches
 
 def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, method="smart"):
@@ -153,7 +155,7 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
     if df_divs.empty: return df_portfolio, 0, [], []
 
-    # --- AUTO-MATCHING ---
+    # Auto-matching
     unique_hist = df_divs['Verdipapir'].unique()
     unique_port = df_portfolio['Verdipapir'].unique()
     auto_matches = auto_match_names(unique_hist, unique_port)
@@ -180,6 +182,8 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
     for name, group in grouped_all:
         ttm_val = grouped_recent.get(name, 0.0)
+        
+        # Endret her: detect_frequency bruker nå kun ekte utbytter
         freq_name, multiplier, is_volatile = detect_frequency_and_volatility(group)
         volatility_tag = " ⚠️" if is_volatile else ""
         
@@ -188,8 +192,17 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
         
         last_dps = 0
         if not group.empty:
-            last_payment = group.sort_values('Dato', ascending=False).iloc[0]
-            last_dps = last_payment['DPS']
+            # For å finne siste utbytte, bør vi kanskje også ignorere aksjeutlån her?
+            # Hvis siste transaksjon var aksjeutlån (lite beløp), blir annualiseringen feil.
+            # Vi filtrerer group for å finne siste *reelle* utbytte.
+            real_divs = group[group['Transaksjonstype'].isin(['UTBYTTE', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL'])]
+            if not real_divs.empty:
+                last_payment = real_divs.sort_values('Dato', ascending=False).iloc[0]
+                last_dps = last_payment['DPS']
+            else:
+                # Fallback hvis kun aksjeutlån finnes
+                last_payment = group.sort_values('Dato', ascending=False).iloc[0]
+                last_dps = last_payment['DPS']
 
         if method == "ttm":
             est_map[name] = ttm_val
@@ -210,29 +223,21 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
                 freq_info[name] = "Uregelmessig (TTM)"
 
     matched_names = []
-    portfolio_names = df_portfolio['Verdipapir'].unique()
-    
-    # Orphans detection
     history_names_mapped = set(df_divs['MappedName'].unique())
     port_set_norm = set([normalize_string(n) for n in portfolio_names])
     
     orphans = []
     for h_name in unique_hist:
         mapped = apply_mapping(h_name)
-        # Sjekk om det mappede navnet faktisk finnes i porteføljen (normalisert)
         if normalize_string(mapped) not in port_set_norm:
             orphans.append(h_name)
 
     def get_estimate(row):
         p_name = row['Verdipapir']
         p_norm = normalize_string(p_name)
-        
-        # Prøv direkte
         if p_name in est_map:
             matched_names.append(p_name)
             return est_map[p_name]
-        
-        # Prøv normalisert
         for est_name, val in est_map.items():
             if normalize_string(est_name) == p_norm:
                 matched_names.append(p_name)
