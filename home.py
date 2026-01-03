@@ -22,6 +22,34 @@ def clean_currency(val):
             return 0.0
     return 0.0
 
+def smart_fill_name(row):
+    """
+    Finner selskapsnavnet hvis 'Verdipapir' er tomt.
+    Dette skjer ofte på Aksjeutlån og Returprovisjon.
+    """
+    verdipapir = row.get('Verdipapir', '')
+    if pd.notna(verdipapir) and str(verdipapir).strip() != "":
+        return str(verdipapir).strip()
+    
+    # Hvis tomt, let i transaksjonsteksten
+    tekst = str(row.get('Transaksjonstekst', ''))
+    
+    # 1. Håndter Aksjeutlån (f.eks. "MPC Container Ships - 2024Q4")
+    # Vi vil fjerne datoer og kvartaler på slutten
+    if "aksjeutlån" in str(row.get('Transaksjonstype', '')).lower():
+        # Fjern " - 202xQx" på slutten
+        clean_text = re.sub(r'\s-\s\d{4}Q\d', '', tekst)
+        return clean_text.strip()
+
+    # 2. Håndter Returprovisjon (f.eks. "Returprovisjon for NO... Landkreditt...")
+    if "returprovisjon" in tekst.lower():
+        # Prøv å finne navnet etter ISIN-koden eller "for "
+        # Fjerner "Returprovisjon for [ISIN] "
+        clean_text = re.sub(r'Returprovisjon for (NO\d+\s)?', '', tekst)
+        return clean_text.strip()
+
+    return "Ukjent"
+
 def load_robust_csv(uploaded_file):
     """Robust innlesing av CSV-filer."""
     separators = ['\t', ';', ',']
@@ -47,14 +75,22 @@ def load_robust_csv(uploaded_file):
     return pd.DataFrame()
 
 def process_transactions(df):
-    """Vasker transaksjonslisten."""
+    """Vasker transaksjonslisten og fikser manglende navn."""
     df.columns = df.columns.str.strip()
+    
+    # Fiks dato
     if 'Bokføringsdag' in df.columns:
         df['Dato'] = pd.to_datetime(df['Bokføringsdag'], errors='coerce')
         df['Måned'] = df['Dato'].dt.strftime('%Y-%m')
         df['År'] = df['Dato'].dt.year
+        
+    # Rens beløp
     if 'Beløp' in df.columns:
         df['Beløp_Clean'] = df['Beløp'].apply(clean_currency)
+    
+    # FIKS: Bruk smart navn-utfylling
+    df['Verdipapir'] = df.apply(smart_fill_name, axis=1)
+        
     return df
 
 def process_portfolio(df):
@@ -88,15 +124,39 @@ def analyze_dividends(df):
     if 'Transaksjonstype' not in df.columns:
         return pd.DataFrame()
 
-    div_types = ['UTBYTTE', 'REINVESTERT UTBYTTE', 'Utbetaling aksjeutlån']
+    # Inkluderer også 'TILBAKEBET. FOND AVG' (Returprovisjon)
+    div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG']
+    
+    # REINVESTERT UTBYTTE er tricky. 
+    # Ofte kommer det som en negativ post (kjøp) etter en positiv post (utbytte).
+    # Vi vil IKKE ha med de negative postene i summen, for da går vinning opp i spinning.
+    # Vi inkluderer 'REINVESTERT UTBYTTE' kun hvis beløpet er POSITIVT (sjelden, men mulig).
+    # Vanlig 'UTBYTTE' dekker inntekten.
+    
     roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
     tax_types = ['KUPONGSKATT', 'KORR UTL KUPSKATT']
     
+    # Filtrer datasettene
     df_divs = df[df['Transaksjonstype'].isin(div_types)].copy()
+    
+    # Legg til positiv reinvest (hvis det finnes feilføringer som er positive)
+    reinvest = df[
+        (df['Transaksjonstype'] == 'REINVESTERT UTBYTTE') & 
+        (df['Beløp_Clean'] > 0)
+    ].copy()
+    if not reinvest.empty:
+        df_divs = pd.concat([df_divs, reinvest])
+
     df_roc = df[df['Transaksjonstype'].isin(roc_types)].copy()
     df_tax = df[df['Transaksjonstype'].isin(tax_types)].copy()
     
+    # Merk typene
     df_divs['Type'] = 'Utbytte'
+    # Merk Returprovisjon spesifikt for klarhet
+    df_divs.loc[df_divs['Transaksjonstype'] == 'TILBAKEBET. FOND AVG', 'Type'] = 'Returprovisjon'
+    # Merk Aksjeutlån
+    df_divs.loc[df_divs['Transaksjonstype'] == 'Utbetaling aksjeutlån', 'Type'] = 'Aksjeutlån'
+    
     df_roc['Type'] = 'Tilbakebetaling'
     
     df_main = pd.concat([df_divs, df_roc])
@@ -104,6 +164,7 @@ def analyze_dividends(df):
     if df_main.empty:
         return pd.DataFrame()
 
+    # Koble skatt
     if 'Verifikationsnummer' in df_main.columns:
         df_main['Key'] = df_main['Verifikationsnummer'].fillna('Unknown')
         df_tax['Key'] = df_tax['Verifikationsnummer'].fillna('Unknown')
@@ -116,6 +177,10 @@ def analyze_dividends(df):
     df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
     df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
     
+    # Sikkerhetsventil: Vi vil kun ha positive innbetalinger i denne oversikten
+    # (Med unntak av korreksjoner, men for utbytteoversikt vil vi se cash in)
+    df_main = df_main[df_main['Netto_Mottatt'] > 0]
+    
     return df_main
 
 # --- HOVEDAPPLIKASJON ---
@@ -127,7 +192,7 @@ st.sidebar.header("Innstillinger")
 konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
 
 if konto_type == "AF-konto":
-    st.sidebar.warning("⚠️ **AF-konto:** 'Tilbakebetaling' er skattefritt, men senker din GAV. Vanlig utbytte skattlegges.")
+    st.sidebar.warning("⚠️ **AF-konto:** 'Tilbakebetaling' er skattefritt (senker GAV). Vanlig utbytte skattlegges.")
 else:
     st.sidebar.success(f"✅ **{konto_type}:** Både utbytte og tilbakebetaling behandles likt (utsatt skatt).")
 
@@ -148,14 +213,19 @@ with tab1:
             if not df_result.empty:
                 years = sorted(df_result['År'].dropna().unique(), reverse=True)
                 
-                # --- VIS TOTALUTVIKLING HVIS FLERE ÅR ---
+                # --- VIS TOTALUTVIKLING ---
                 if len(years) > 1:
                     st.subheader("📈 Årlig utvikling")
                     yearly_stats = df_result.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
                     
                     fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type',
                                        title="Utbetalinger år for år", text_auto='.2s',
-                                       color_discrete_map={'Utbytte': '#00CC96', 'Tilbakebetaling': '#AB63FA'})
+                                       color_discrete_map={
+                                           'Utbytte': '#00CC96', 
+                                           'Tilbakebetaling': '#AB63FA',
+                                           'Aksjeutlån': '#FFA15A',
+                                           'Returprovisjon': '#19D3F3'
+                                       })
                     st.plotly_chart(fig_trend, use_container_width=True)
                     st.divider()
 
@@ -164,21 +234,21 @@ with tab1:
                 df_year = df_result[df_result['År'] == selected_year]
                 
                 # Metrics
-                tot_utbytte = df_year[df_year['Type'] == 'Utbytte']['Netto_Mottatt'].sum()
-                tot_tilbake = df_year[df_year['Type'] == 'Tilbakebetaling']['Netto_Mottatt'].sum()
-                tot_total = tot_utbytte + tot_tilbake
+                total = df_year['Netto_Mottatt'].sum()
                 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Totalt mottatt (cash)", f"{tot_total:,.0f} NOK")
-                c2.metric("Herav utbytte", f"{tot_utbytte:,.0f} NOK")
-                c3.metric("Herav tilbakebetaling", f"{tot_tilbake:,.0f} NOK", 
-                          help="På AF-konto er dette skattefritt, men senker GAV.")
+                # Lag dynamiske kolonner for hver type inntekt
+                stats = df_year.groupby('Type')['Netto_Mottatt'].sum()
+                
+                cols = st.columns(len(stats) + 1)
+                cols[0].metric("Totalt (netto)", f"{total:,.0f} NOK")
+                
+                for i, (type_name, value) in enumerate(stats.items()):
+                    cols[i+1].metric(type_name, f"{value:,.0f} NOK")
                 
                 # Graf
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
                 fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type',
-                             title=f"Utbetalinger per måned ({selected_year})", text_auto='.2s',
-                             color_discrete_map={'Utbytte': '#00CC96', 'Tilbakebetaling': '#AB63FA'})
+                             title=f"Utbetalinger per måned ({selected_year})", text_auto='.2s')
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Tabell
