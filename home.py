@@ -10,48 +10,45 @@ st.set_page_config(page_title="Min utbytte-tracker", layout="wide", page_icon="�
 # --- HJELPEFUNKSJONER ---
 
 def clean_currency(val):
-    """Renser tall fra Nordnet."""
-    if pd.isna(val) or val == "":
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
+    if pd.isna(val) or val == "": return 0.0
+    if isinstance(val, (int, float)): return float(val)
     if isinstance(val, str):
         val = val.replace('\xa0', '').replace(' ', '').replace(',', '.')
-        try:
-            return float(val)
-        except ValueError:
-            return 0.0
+        try: return float(val)
+        except ValueError: return 0.0
     return 0.0
 
 def normalize_string(text):
-    """Vasker selskapsnavn for å øke sjansen for match."""
+    """
+    Aggressiv navnevask: Fjerner alt av mellomrom og spesialtegn.
+    Gjør at 'BW LPG' == 'BWLPG'.
+    """
     if not isinstance(text, str): return str(text)
     text = text.lower()
-    suffixes = [r'\sasa$', r'\sas$', r'\sltd$', r'\scorp$', r'\sab$', r'\splc$', r'\sinc$']
+    
+    # 1. Fjern suffixes først (mens vi fortsatt har mellomrom)
+    suffixes = [r'\sasa$', r'\sas$', r'\sltd$', r'\scorp$', r'\sab$', r'\splc$', r'\sinc$', r'\sclass a$', r'\sa$']
     for suffix in suffixes:
         text = re.sub(suffix, '', text)
-    text = re.sub(r'[.,\-]', '', text)
-    return text.strip()
+        
+    # 2. Fjern ALT som ikke er bokstaver (a-z) eller tall (0-9). Inkludert mellomrom.
+    text = re.sub(r'[^a-z0-9]', '', text)
+    
+    return text
 
 def smart_fill_name(row):
-    """Finner selskapsnavnet hvis 'Verdipapir' er tomt."""
     verdipapir = row.get('Verdipapir', '')
     if pd.notna(verdipapir) and str(verdipapir).strip() != "" and str(verdipapir).lower() != "nan":
         return str(verdipapir).strip()
     
     tekst = str(row.get('Transaksjonstekst', ''))
-    
     if "aksjeutlån" in str(row.get('Transaksjonstype', '')).lower():
         clean_text = re.sub(r'\s-\s\d{4}Q\d', '', tekst)
         return clean_text.strip()
-
     if "returprovisjon" in tekst.lower():
         clean_text = re.sub(r'Returprovisjon for (NO\d+\s)?', '', tekst)
         return clean_text.strip()
-    
-    if tekst.strip() != "":
-        return tekst.strip()
-
+    if tekst.strip() != "": return tekst.strip()
     return "Ukjent selskap"
 
 def load_robust_csv(uploaded_file):
@@ -106,14 +103,12 @@ def parse_clipboard_text(text):
 def detect_frequency_and_volatility(df_stock):
     dates = df_stock['Dato'].dt.date.unique()
     dates.sort()
-    
     if len(dates) < 2: return "Ukjent", 0, False
     
     recent_dates = dates[-5:]
     diffs = []
     for i in range(1, len(recent_dates)):
         diffs.append((recent_dates[i] - recent_dates[i-1]).days)
-        
     avg_diff = sum(diffs) / len(diffs)
     
     if 20 <= avg_diff <= 45: freq, mult = "Månedlig", 12
@@ -125,31 +120,51 @@ def detect_frequency_and_volatility(df_stock):
     dps_series = df_stock.apply(lambda r: r['Beløp_Clean']/r['Antall'] if r['Antall']>0 else 0, axis=1)
     mean_dps = dps_series.mean()
     std_dev = dps_series.std()
-    
     is_volatile = False
     if mean_dps > 0 and (std_dev / mean_dps) > 0.2: is_volatile = True
-        
     return freq, mult, is_volatile
+
+def auto_match_names(history_names, portfolio_names):
+    """Prøver å matche navn automatisk med fuzzy logic."""
+    matches = {}
+    # Nå er norm keys uten mellomrom (bwlpg)
+    port_norm = {normalize_string(p): p for p in portfolio_names}
+    
+    for h_name in history_names:
+        h_norm = normalize_string(h_name)
+        
+        # 1. Eksakt match (aggressiv normalisering)
+        if h_norm in port_norm:
+            matches[h_name] = port_norm[h_norm]
+            continue
+            
+        # 2. Inneholder (Sjekk om 'odfjell' er i 'odfjella')
+        for p_norm_key, p_real in port_norm.items():
+            if len(h_norm) > 3 and (h_norm in p_norm_key or p_norm_key in h_norm):
+                 matches[h_name] = p_real
+                 break
+                 
+    return matches
 
 def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, method="smart"):
     if df_history.empty or df_portfolio.empty: return df_portfolio, 0, [], []
 
     div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
-    
     if df_divs.empty: return df_portfolio, 0, [], []
 
-    # Mapping av navn
+    # --- AUTO-MATCHING ---
+    unique_hist = df_divs['Verdipapir'].unique()
+    unique_port = df_portfolio['Verdipapir'].unique()
+    auto_matches = auto_match_names(unique_hist, unique_port)
+    
     def apply_mapping(name):
         if name in mapping_dict: return mapping_dict[name]
-        norm_name = normalize_string(name)
-        for key, val in mapping_dict.items():
-            if normalize_string(key) == norm_name: return val
+        if name in auto_matches: return auto_matches[name]
         return name
 
     df_divs['MappedName'] = df_divs['Verdipapir'].apply(apply_mapping)
     
-    # Dato-filter (380 dager)
     max_date = df_divs['Dato'].max()
     cutoff_date = max_date - pd.DateOffset(days=380)
     df_recent = df_divs[df_divs['Dato'] >= cutoff_date].copy()
@@ -197,22 +212,27 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     matched_names = []
     portfolio_names = df_portfolio['Verdipapir'].unique()
     
-    # Identifiser foreldreløse tickers
-    history_names = set(df_divs['MappedName'].unique())
-    port_norm = set([normalize_string(n) for n in portfolio_names])
+    # Orphans detection
+    history_names_mapped = set(df_divs['MappedName'].unique())
+    port_set_norm = set([normalize_string(n) for n in portfolio_names])
     
     orphans = []
-    for h_name in history_names:
-        if normalize_string(h_name) not in port_norm:
+    for h_name in unique_hist:
+        mapped = apply_mapping(h_name)
+        # Sjekk om det mappede navnet faktisk finnes i porteføljen (normalisert)
+        if normalize_string(mapped) not in port_set_norm:
             orphans.append(h_name)
 
     def get_estimate(row):
         p_name = row['Verdipapir']
+        p_norm = normalize_string(p_name)
+        
+        # Prøv direkte
         if p_name in est_map:
             matched_names.append(p_name)
             return est_map[p_name]
         
-        p_norm = normalize_string(p_name)
+        # Prøv normalisert
         for est_name, val in est_map.items():
             if normalize_string(est_name) == p_norm:
                 matched_names.append(p_name)
@@ -221,8 +241,8 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
     def get_freq_text(row):
         p_name = row['Verdipapir']
-        if p_name in freq_info: return freq_info[p_name]
         p_norm = normalize_string(p_name)
+        if p_name in freq_info: return freq_info[p_name]
         for f_name, txt in freq_info.items():
             if normalize_string(f_name) == p_norm: return txt
         return "-"
@@ -249,7 +269,6 @@ def analyze_dividends(df):
     df_divs.loc[df_divs['Transaksjonstype'] == 'TILBAKEBET. FOND AVG', 'Type'] = 'Returprovisjon'
     df_divs.loc[df_divs['Transaksjonstype'] == 'Utbetaling aksjeutlån', 'Type'] = 'Aksjeutlån'
     df_roc['Type'] = 'Tilbakebetaling'
-    
     df_main = pd.concat([df_divs, df_roc])
     if df_main.empty: return pd.DataFrame()
 
@@ -271,6 +290,8 @@ st.title("💰 Utbytte-dashboard")
 
 if 'history_df' not in st.session_state: st.session_state['history_df'] = pd.DataFrame()
 if 'mapping' not in st.session_state: st.session_state['mapping'] = {}
+if 'orphans' not in st.session_state: st.session_state['orphans'] = []
+if 'port_names' not in st.session_state: st.session_state['port_names'] = []
 
 st.sidebar.header("Innstillinger")
 konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
@@ -350,45 +371,54 @@ with tab2:
                         st.session_state['mapping'],
                         method=mapping[est_method]
                     )
-                    
+                    st.session_state['orphans'] = orphans
+                    st.session_state['port_names'] = port_names
                     if count > 0: st.success(f"Matchet {count} selskaper!")
                     else: st.warning("Fant få/ingen matcher.")
-                    
-                    if orphans:
-                        st.error(f"⚠️ Fant {len(orphans)} transaksjoner som ikke matcher porteføljen. Koble dem her:")
-                        with st.expander("🔗 Koble ukjente tickers til aksjer"):
-                            c1, c2, c3 = st.columns([2, 2, 1])
-                            with c1: selected_orphan = st.selectbox("Ukjent ticker", orphans)
-                            with c2: target_stock = st.selectbox("Tilhører aksje", sorted(port_names))
-                            with c3:
-                                st.write("")
-                                st.write("")
-                                if st.button("Lagre kobling"):
-                                    st.session_state['mapping'][selected_orphan] = target_stock
-                                    st.rerun()
-                            if st.session_state['mapping']:
-                                st.write("Dine koblinger:")
-                                st.json(st.session_state['mapping'])
             else: st.info("Mangler historikk (Fane 1).")
 
+        # --- NAVNEKOBLEREN ---
+        if st.session_state['orphans']:
+            st.warning(f"⚠️ {len(st.session_state['orphans'])} navn matchet ikke automatisk.")
+            with st.expander("🔗 Koble manuelt", expanded=True):
+                c1, c2, c3 = st.columns([2, 2, 1])
+                with c1: selected_orphan = st.selectbox("Ukjent ticker", st.session_state['orphans'])
+                with c2: target_stock = st.selectbox("Tilhører aksje", sorted(st.session_state['port_names']))
+                with c3:
+                    st.write("")
+                    st.write("")
+                    if st.button("Lagre kobling"):
+                        st.session_state['mapping'][selected_orphan] = target_stock
+                        st.session_state['orphans'].remove(selected_orphan)
+                        st.rerun()
+                if st.session_state['mapping']:
+                    st.write("Dine koblinger:")
+                    st.json(st.session_state['mapping'])
+                    if st.button("Nullstill koblinger"):
+                        st.session_state['mapping'] = {}
+                        st.rerun()
+
+        if not st.session_state['history_df'].empty and df_port is not None:
+             df_port, _, _, _ = estimate_dividends_from_history(
+                        st.session_state['history_df'], 
+                        df_port, 
+                        st.session_state['mapping'],
+                        method=mapping[est_method]
+                    )
+
         cols = [c for c in ['Verdipapir', 'Antall', 'GAV', 'Est. Utbytte', 'Info'] if c in df_port.columns]
-        
-        # --- HER VAR FEILEN ---
         column_config = {
             "GAV": st.column_config.NumberColumn(format="%.2f kr"),
             "Est. Utbytte": st.column_config.NumberColumn(format="%.2f kr", step=0.1),
             "Info": st.column_config.TextColumn(disabled=True),
         }
-        
         edited_df = st.data_editor(df_port[cols], column_config=column_config, width="stretch")
         
         if 'Antall' in edited_df.columns and 'Est. Utbytte' in edited_df.columns:
             edited_df['Sum utbytte'] = edited_df['Antall'] * edited_df['Est. Utbytte']
             if 'GAV' in edited_df.columns:
                 edited_df['YoC %'] = edited_df.apply(lambda x: (x['Est. Utbytte']/x['GAV']*100) if x['GAV']>0 else 0, axis=1)
-                
             total = edited_df['Sum utbytte'].sum()
             st.metric("Estimert årlig inntekt", f"{total:,.0f} NOK")
-            
             res_cols = [c for c in ['Verdipapir', 'Info', 'YoC %', 'Sum utbytte'] if c in edited_df.columns]
             st.dataframe(edited_df[res_cols].style.format({'YoC %': '{:.2f} %', 'Sum utbytte': '{:.0f} kr'}), width="stretch")
