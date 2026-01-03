@@ -108,17 +108,13 @@ def parse_clipboard_text(text):
     return pd.DataFrame(data)
 
 def detect_frequency_and_volatility(df_stock):
-    """
-    Analyserer datoene for å finne frekvens, og beløpene for å finne volatilitet.
-    Returnerer: (frekvens_navn, multiplier, is_volatile)
-    """
+    """Analyserer frekvens og volatilitet."""
     dates = df_stock['Dato'].dt.date.unique()
     dates.sort()
     
     if len(dates) < 2:
         return "Ukjent", 0, False
     
-    # 1. Frekvensanalyse (siste 5)
     recent_dates = dates[-5:]
     diffs = []
     for i in range(1, len(recent_dates)):
@@ -137,27 +133,18 @@ def detect_frequency_and_volatility(df_stock):
     else:
         freq, mult = "Uregelmessig", 0
 
-    # 2. Volatilitetsanalyse (Sjekk om utbyttet hopper opp og ned)
-    # Beregn DPS for hver utbetaling for å sammenligne
     dps_series = df_stock.apply(lambda r: r['Beløp_Clean']/r['Antall'] if r['Antall']>0 else 0, axis=1)
-    
-    # Hvis standardavviket er høyt i forhold til snittet, er det volatilt (ekstraordinært?)
     mean_dps = dps_series.mean()
     std_dev = dps_series.std()
     
     is_volatile = False
-    if mean_dps > 0 and (std_dev / mean_dps) > 0.2: # Hvis variasjonen er mer enn 20%
+    if mean_dps > 0 and (std_dev / mean_dps) > 0.2:
         is_volatile = True
         
     return freq, mult, is_volatile
 
 def estimate_dividends_from_history(df_history, df_portfolio, method="smart"):
-    """
-    Beregner estimert utbytte.
-    method="ttm": Sum siste 12 mnd.
-    method="smart": Annualisert siste utbytte (aggressiv).
-    method="avg": Annualisert gjennomsnitt siste 12 mnd (konservativ, bra for shipping).
-    """
+    """Beregner estimert utbytte."""
     if df_history.empty or df_portfolio.empty:
         return df_portfolio
 
@@ -167,7 +154,6 @@ def estimate_dividends_from_history(df_history, df_portfolio, method="smart"):
     if df_divs.empty:
         return df_portfolio
 
-    # Siste 12 mnd
     max_date = df_divs['Dato'].max()
     cutoff_date = max_date - pd.DateOffset(days=365)
     df_recent = df_divs[df_divs['Dato'] >= cutoff_date].copy()
@@ -183,38 +169,31 @@ def estimate_dividends_from_history(df_history, df_portfolio, method="smart"):
 
     for name, group in grouped_all:
         ttm_val = grouped_recent.get(name, 0.0)
-        
-        # Kjør analyse
         freq_name, multiplier, is_volatile = detect_frequency_and_volatility(group)
         volatility_tag = " ⚠️ Variabelt" if is_volatile else ""
         
-        # Beregn snitt-DPS siste 12 mnd (for 'avg' metode)
         recent_group = df_recent[df_recent['Verdipapir'] == name]
         avg_dps = recent_group['DPS'].mean() if not recent_group.empty else 0
         
-        # Finn siste DPS
         last_dps = 0
         if not group.empty:
             last_payment = group.sort_values('Dato', ascending=False).iloc[0]
             last_dps = last_payment['DPS']
 
-        # VELG METODE
         if method == "ttm":
             est_map[name] = ttm_val
             freq_info[name] = f"TTM (Sum 12 mnd)"
             
         elif method == "avg":
-            # Konservativ: Snitt av siste års betalinger * frekvens
             if multiplier > 0 and avg_dps > 0:
                 est_val = avg_dps * multiplier
                 est_map[name] = est_val
                 freq_info[name] = f"{freq_name} (Snitt){volatility_tag}"
             else:
-                est_map[name] = ttm_val # Fallback
+                est_map[name] = ttm_val
                 freq_info[name] = "Uregelmessig (TTM)"
 
         elif method == "smart":
-            # Aggressiv: Siste * frekvens
             if multiplier > 0:
                 est_val = last_dps * multiplier
                 est_map[name] = est_val
@@ -235,7 +214,7 @@ def estimate_dividends_from_history(df_history, df_portfolio, method="smart"):
     return df_portfolio, len(est_map)
 
 def analyze_dividends(df):
-    """Kobler utbytte, tilbakebetaling og skatt."""
+    """Kobler utbytte og skatt."""
     if 'Transaksjonstype' not in df.columns:
         return pd.DataFrame()
 
@@ -311,7 +290,8 @@ with tab1:
                     fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type',
                                        title="Utbetalinger år for år", text_auto='.2s',
                                        color_discrete_map={'Utbytte': '#00CC96', 'Tilbakebetaling': '#AB63FA', 'Aksjeutlån': '#FFA15A', 'Returprovisjon': '#19D3F3'})
-                    st.plotly_chart(fig_trend, use_container_width=True)
+                    # ENDRING HER: use_container_width -> width
+                    st.plotly_chart(fig_trend, width="stretch")
                     st.divider()
 
                 selected_year = st.selectbox("Velg år for detaljer", years)
@@ -328,7 +308,8 @@ with tab1:
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
                 fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type',
                              title=f"Utbetalinger per måned ({selected_year})", text_auto='.2s')
-                st.plotly_chart(fig, use_container_width=True)
+                # ENDRING HER: use_container_width -> width
+                st.plotly_chart(fig, width="stretch")
                 
                 st.write("Transaksjoner:")
                 st.dataframe(df_year[['Dato', 'Verdipapir', 'Type', 'Netto_Mottatt', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
@@ -363,7 +344,7 @@ with tab2:
         with col_opt:
             est_method = st.radio("Velg beregningsmetode:", 
                                   ["Smart (Siste annualisert)", "Konservativ (Snitt siste år)", "TTM (Sum 12 mnd)"],
-                                  help="Smart ganger opp siste utbytte (risikabelt i shipping). Konservativ bruker snittet av alle utbetalinger siste år.",
+                                  help="Smart ganger opp siste utbytte. Konservativ bruker snittet av alle utbetalinger siste år.",
                                   horizontal=True)
         
         mapping = {"Smart (Siste annualisert)": "smart", "Konservativ (Snitt siste år)": "avg", "TTM (Sum 12 mnd)": "ttm"}
