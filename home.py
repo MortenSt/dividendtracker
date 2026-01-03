@@ -4,7 +4,7 @@ import re
 import plotly.express as px
 
 # --- OPPSETT ---
-st.set_page_config(page_title="Min Utbytte-Tracker", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Min utbytte-tracker", layout="wide", page_icon="📈")
 
 # --- HJELPEFUNKSJONER ---
 
@@ -27,7 +27,6 @@ def load_robust_csv(uploaded_file):
     separators = ['\t', ';', ',']
     encodings = ['utf-16', 'utf-8', 'latin-1', 'iso-8859-1']
     
-    # Prøv å gjette separator
     try:
         sample = uploaded_file.read(1024).decode('utf-8', errors='ignore')
         uploaded_file.seek(0)
@@ -89,27 +88,22 @@ def analyze_dividends(df):
     if 'Transaksjonstype' not in df.columns:
         return pd.DataFrame()
 
-    # Definer typer
     div_types = ['UTBYTTE', 'REINVESTERT UTBYTTE', 'Utbetaling aksjeutlån']
-    roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL'] # Return of Capital
+    roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
     tax_types = ['KUPONGSKATT', 'KORR UTL KUPSKATT']
     
-    # Filtrer
     df_divs = df[df['Transaksjonstype'].isin(div_types)].copy()
     df_roc = df[df['Transaksjonstype'].isin(roc_types)].copy()
     df_tax = df[df['Transaksjonstype'].isin(tax_types)].copy()
     
-    # Merk typene for senere visualisering
     df_divs['Type'] = 'Utbytte'
     df_roc['Type'] = 'Tilbakebetaling'
     
-    # Slå sammen utbytte og tilbakebetaling i en hovedliste
     df_main = pd.concat([df_divs, df_roc])
     
     if df_main.empty:
         return pd.DataFrame()
 
-    # Koble skatt (Gjelder som regel kun utbytte, men vi sjekker alt)
     if 'Verifikationsnummer' in df_main.columns:
         df_main['Key'] = df_main['Verifikationsnummer'].fillna('Unknown')
         df_tax['Key'] = df_tax['Verifikationsnummer'].fillna('Unknown')
@@ -126,24 +120,24 @@ def analyze_dividends(df):
 
 # --- HOVEDAPPLIKASJON ---
 
-st.title("💰 Utbytte-Dashboard")
+st.title("💰 Utbytte-dashboard")
 
 # Sidebar
 st.sidebar.header("Innstillinger")
-konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-Konto"])
+konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
 
-if konto_type == "AF-Konto":
-    st.sidebar.warning("⚠️ **AF-Konto:** 'Tilbakebetaling' er skattefritt, men senker din GAV. Vanlig utbytte skattlegges.")
+if konto_type == "AF-konto":
+    st.sidebar.warning("⚠️ **AF-konto:** 'Tilbakebetaling' er skattefritt, men senker din GAV. Vanlig utbytte skattlegges.")
 else:
     st.sidebar.success(f"✅ **{konto_type}:** Både utbytte og tilbakebetaling behandles likt (utsatt skatt).")
 
 # Tabs
-tab1, tab2 = st.tabs(["📊 Historikk (Transaksjoner)", "📷 Nåsituasjon (Portefølje)"])
+tab1, tab2 = st.tabs(["📊 Historikk (transaksjoner)", "📷 Nåsituasjon (portefølje)"])
 
 # --- TAB 1: HISTORIKK ---
 with tab1:
-    st.header("Historisk Kontantstrøm")
-    uploaded_trans = st.file_uploader("Last opp Transaksjons-CSV", type=["csv", "txt"], key="trans")
+    st.header("Historisk kontantstrøm")
+    uploaded_trans = st.file_uploader("Last opp transaksjons-CSV", type=["csv", "txt"], key="trans")
     
     if uploaded_trans:
         df_raw = load_robust_csv(uploaded_trans)
@@ -156,8 +150,7 @@ with tab1:
                 
                 # --- VIS TOTALUTVIKLING HVIS FLERE ÅR ---
                 if len(years) > 1:
-                    st.subheader("📈 Årlig Utvikling")
-                    # Grupper på både År og Type for å vise fordelingen
+                    st.subheader("📈 Årlig utvikling")
                     yearly_stats = df_result.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
                     
                     fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type',
@@ -176,9 +169,9 @@ with tab1:
                 tot_total = tot_utbytte + tot_tilbake
                 
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Totalt Mottatt (Cash)", f"{tot_total:,.0f} NOK")
-                c2.metric("Herav Utbytte", f"{tot_utbytte:,.0f} NOK")
-                c3.metric("Herav Tilbakebetaling", f"{tot_tilbake:,.0f} NOK", 
+                c1.metric("Totalt mottatt (cash)", f"{tot_total:,.0f} NOK")
+                c2.metric("Herav utbytte", f"{tot_utbytte:,.0f} NOK")
+                c3.metric("Herav tilbakebetaling", f"{tot_tilbake:,.0f} NOK", 
                           help="På AF-konto er dette skattefritt, men senker GAV.")
                 
                 # Graf
@@ -196,12 +189,12 @@ with tab1:
 
 # --- TAB 2: PORTFOLIO ---
 with tab2:
-    st.header("Portefølje-oversikt")
-    method = st.radio("Metode:", ["Last opp CSV (Anbefalt)", "Lim inn tekst (Backup)"])
+    st.header("Porteføljeoversikt")
+    method = st.radio("Metode:", ["Last opp CSV (anbefalt)", "Lim inn tekst (backup)"])
     
     df_port = pd.DataFrame()
     
-    if method == "Last opp CSV (Anbefalt)":
+    if method == "Last opp CSV (anbefalt)":
         uploaded_port = st.file_uploader("Last opp 'aksjelister...csv'", type=["csv", "txt"], key="port")
         if uploaded_port:
             df_raw_port = load_robust_csv(uploaded_port)
@@ -222,15 +215,15 @@ with tab2:
         
         column_config = {
             "GAV": st.column_config.NumberColumn(format="%.2f kr"),
-            "Est. Utbytte": st.column_config.NumberColumn(format="%.2f kr", step=0.1),
+            "Est. Utbytte": st.column_config.NumberColumn(label="Est. utbytte", format="%.2f kr", step=0.1),
         }
         
         edited_df = st.data_editor(df_port[cols], column_config=column_config, use_container_width=True)
         
         if 'Antall' in edited_df.columns and 'Est. Utbytte' in edited_df.columns:
-            edited_df['Sum Utbytte'] = edited_df['Antall'] * edited_df['Est. Utbytte']
+            edited_df['Sum utbytte'] = edited_df['Antall'] * edited_df['Est. Utbytte']
             if 'GAV' in edited_df.columns:
                 edited_df['YoC %'] = edited_df.apply(lambda x: (x['Est. Utbytte']/x['GAV']*100) if x['GAV']>0 else 0, axis=1)
                 
-            total = edited_df['Sum Utbytte'].sum()
-            st.metric("Estimert Årlig Inntekt", f"{total:,.0f} NOK")
+            total = edited_df['Sum utbytte'].sum()
+            st.metric("Estimert årlig inntekt", f"{total:,.0f} NOK")
