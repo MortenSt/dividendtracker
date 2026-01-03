@@ -19,7 +19,6 @@ def clean_currency(val):
     return 0.0
 
 def normalize_string(text):
-    """Aggressiv navnevask: Fjerner alt av mellomrom og spesialtegn."""
     if not isinstance(text, str): return str(text)
     text = text.lower()
     suffixes = [r'\sasa$', r'\sas$', r'\sltd$', r'\scorp$', r'\sab$', r'\splc$', r'\sinc$', r'\sclass a$', r'\sa$']
@@ -93,10 +92,8 @@ def parse_clipboard_text(text):
     return pd.DataFrame(data)
 
 def detect_frequency_and_volatility(df_stock):
-    # IGNORER aksjeutlån for datoberegning
     real_div_types = ['UTBYTTE', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL', 'REINVESTERT UTBYTTE']
     df_dates = df_stock[df_stock['Transaksjonstype'].isin(real_div_types)]
-    
     if df_dates.empty: df_dates = df_stock
 
     dates = df_dates['Dato'].dt.date.unique()
@@ -144,7 +141,6 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
     if df_divs.empty: return df_portfolio, 0, [], []
 
-    # Auto-matching
     unique_hist = df_divs['Verdipapir'].unique()
     unique_port = df_portfolio['Verdipapir'].unique()
     auto_matches = auto_match_names(unique_hist, unique_port)
@@ -244,7 +240,6 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
 def analyze_dividends(df):
     if 'Transaksjonstype' not in df.columns: return pd.DataFrame()
-
     div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG']
     reinvest = df[(df['Transaksjonstype'] == 'REINVESTERT UTBYTTE') & (df['Beløp_Clean'] > 0)].copy()
     roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
@@ -291,7 +286,7 @@ else: st.sidebar.success(f"✅ **{konto_type}:** Alt behandles likt.")
 
 tab1, tab2, tab3 = st.tabs(["📊 Historikk", "📷 Portefølje", "🏆 Toppliste"])
 
-# --- TAB 1: HISTORIKK ---
+# --- TAB 1 ---
 with tab1:
     st.header("Historisk kontantstrøm")
     uploaded_trans = st.file_uploader("Last opp transaksjons-CSV", type=["csv", "txt"], key="trans")
@@ -322,10 +317,9 @@ with tab1:
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
                 fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type', title=f"Per måned ({selected_year})", text_auto='.2s')
                 st.plotly_chart(fig, width="stretch")
-                
                 st.dataframe(df_year[['Dato', 'Verdipapir', 'Type', 'Netto_Mottatt', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
 
-# --- TAB 2: PORTEFØLJE ---
+# --- TAB 2 ---
 with tab2:
     st.header("Portefølje & Estimat")
     method = st.radio("Metode:", ["Last opp CSV", "Lim inn tekst"])
@@ -347,30 +341,35 @@ with tab2:
         col_opt, col_btn = st.columns([2, 1])
         with col_opt:
             est_method = st.radio("Metode:", ["Smart (Siste annualisert)", "Konservativ (Snitt siste år)", "TTM (Sum 12 mnd)"], horizontal=True)
-        
         mapping = {"Smart (Siste annualisert)": "smart", "Konservativ (Snitt siste år)": "avg", "TTM (Sum 12 mnd)": "ttm"}
         
-        with col_btn:
-            st.write("")
-            st.write("")
-            if not st.session_state['history_df'].empty:
-                if st.button("🤖 Beregn nå"):
-                    df_port, count, orphans, port_names = estimate_dividends_from_history(
+        # KJØR BEREGNING AUTOMATISK HVER GANG SIDEN LASTES
+        if not st.session_state['history_df'].empty and df_port is not None:
+             df_port, count, orphans, port_names = estimate_dividends_from_history(
                         st.session_state['history_df'], 
                         df_port, 
                         st.session_state['mapping'],
                         method=mapping[est_method]
                     )
-                    st.session_state['orphans'] = orphans
-                    st.session_state['port_names'] = port_names
+             # Oppdater state umiddelbart
+             st.session_state['orphans'] = orphans
+             st.session_state['port_names'] = port_names
+
+        with col_btn:
+            st.write("")
+            st.write("")
+            if not st.session_state['history_df'].empty:
+                if st.button("🤖 Oppdater beregning"):
+                    # Knappen trenger egentlig ikke gjøre noe annet enn å trigger rerun, siden koden over kjører uansett.
+                    # Men vi kan gi en hyggelig melding.
                     if count > 0: st.success(f"Matchet {count} selskaper!")
                     else: st.warning("Fant få/ingen matcher.")
             else: st.info("Mangler historikk (Fane 1).")
 
-        # --- NAVNEKOBLEREN ---
+        # --- NAVNEKOBLEREN (Nå ligger den utenfor knappen, så den er alltid synlig) ---
         if st.session_state['orphans']:
-            st.warning(f"⚠️ {len(st.session_state['orphans'])} navn matchet ikke automatisk.")
-            with st.expander("🔗 Koble manuelt", expanded=True):
+            st.warning(f"⚠️ Fant {len(st.session_state['orphans'])} transaksjoner som ikke matcher porteføljen. Koble dem her:")
+            with st.expander("🔗 Koble ukjente tickers til aksjer", expanded=True):
                 c1, c2, c3 = st.columns([2, 2, 1])
                 with c1: selected_orphan = st.selectbox("Ukjent ticker", st.session_state['orphans'])
                 with c2: target_stock = st.selectbox("Tilhører aksje", sorted(st.session_state['port_names']))
@@ -379,22 +378,15 @@ with tab2:
                     st.write("")
                     if st.button("Lagre kobling"):
                         st.session_state['mapping'][selected_orphan] = target_stock
-                        st.session_state['orphans'].remove(selected_orphan)
+                        # Tving en rerun slik at koblingen trer i kraft umiddelbart
                         st.rerun()
+                
                 if st.session_state['mapping']:
-                    st.write("Dine koblinger:")
+                    st.write("Dine aktive koblinger:")
                     st.json(st.session_state['mapping'])
-                    if st.button("Nullstill koblinger"):
+                    if st.button("Nullstill alle koblinger"):
                         st.session_state['mapping'] = {}
                         st.rerun()
-
-        if not st.session_state['history_df'].empty and df_port is not None:
-             df_port, _, _, _ = estimate_dividends_from_history(
-                        st.session_state['history_df'], 
-                        df_port, 
-                        st.session_state['mapping'],
-                        method=mapping[est_method]
-                    )
 
         cols = [c for c in ['Verdipapir', 'Antall', 'GAV', 'Est. Utbytte', 'Info'] if c in df_port.columns]
         column_config = {
@@ -419,65 +411,41 @@ with tab3:
     
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
-        
-        # 1. Analyser og finn utbyttene
         df_divs = analyze_dividends(df_hist)
         
         if not df_divs.empty:
-            # 2. Bruk 'mapping' og 'normalize_string' for å rydde opp i navnene
-            # Hvis bruker har koblet MPCC -> MPC Container Ships i Tab 2, brukes det her også.
             manual_map = st.session_state['mapping']
-            
             def get_clean_name(name):
-                # Sjekk manuell kobling
                 if name in manual_map: return manual_map[name]
                 return name
             
             df_divs['CleanName'] = df_divs['Verdipapir'].apply(get_clean_name)
-            
-            # Smart-sammenslåing av like navn som IKKE er koblet manuelt (BWLPG vs BW LPG)
-            # Vi lager en normalisert nøkkel og grouper på den
             df_divs['NormKey'] = df_divs['CleanName'].apply(normalize_string)
             
-            # Finn det fineste navnet for hver normaliserte nøkkel (lengste navn vinner ofte)
             key_to_display = {}
             for key, group in df_divs.groupby('NormKey'):
-                # Finn det lengste navnet i gruppen som display name
                 best_name = max(group['CleanName'].unique(), key=len)
                 key_to_display[key] = best_name
-                
             df_divs['DisplayName'] = df_divs['NormKey'].map(key_to_display)
             
-            # 3. Filter på år
             years = sorted(df_divs['År'].dropna().unique(), reverse=True)
             filter_year = st.selectbox("Velg periode", ["Alle år"] + list(years))
             
-            if filter_year != "Alle år":
-                df_view = df_divs[df_divs['År'] == filter_year]
-            else:
-                df_view = df_divs
+            if filter_year != "Alle år": df_view = df_divs[df_divs['År'] == filter_year]
+            else: df_view = df_divs
             
-            # 4. Group og Sum
             top_list = df_view.groupby('DisplayName')['Netto_Mottatt'].sum().reset_index()
             top_list = top_list.sort_values('Netto_Mottatt', ascending=False).reset_index(drop=True)
             top_list.columns = ['Selskap', 'Totalt Mottatt']
             
-            # 5. Vis Graf og Tabell
             col1, col2 = st.columns([2, 1])
-            
             with col1:
                 st.subheader("Grafisk oversikt")
-                # Begrens til topp 20 for ryddig graf
-                fig = px.bar(top_list.head(20), x='Totalt Mottatt', y='Selskap', orientation='h', 
-                             title=f"Topp 20 Utbytteaksjer ({filter_year})", text_auto='.2s')
+                fig = px.bar(top_list.head(20), x='Totalt Mottatt', y='Selskap', orientation='h', title=f"Topp 20 Utbytteaksjer ({filter_year})", text_auto='.2s')
                 fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
                 st.plotly_chart(fig, width="stretch")
-                
             with col2:
                 st.subheader("Tabell")
                 st.dataframe(top_list.style.format({'Totalt Mottatt': '{:,.0f} kr'}), width="stretch")
-                
-        else:
-            st.warning("Fant ingen utbytter i historikken.")
-    else:
-        st.info("Du må laste opp en transaksjonsfil i 'Historikk'-fanen først.")
+        else: st.warning("Fant ingen utbytter.")
+    else: st.info("Mangler historikk.")
