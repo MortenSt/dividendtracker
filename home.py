@@ -206,11 +206,8 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
                 freq_info[name] = "Uregelmessig (TTM)"
 
     matched_names = []
-    
-    # --- FIX: Definer portfolio_names FØR vi bruker den ---
     portfolio_names = df_portfolio['Verdipapir'].unique()
     
-    # Identifiser orphans
     history_names_mapped = set(df_divs['MappedName'].unique())
     port_set_norm = set([normalize_string(n) for n in portfolio_names])
     
@@ -292,9 +289,9 @@ konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
 if konto_type == "AF-konto": st.sidebar.warning("⚠️ **AF-konto:** 'Tilbakebetaling' er skattefritt.")
 else: st.sidebar.success(f"✅ **{konto_type}:** Alt behandles likt.")
 
-tab1, tab2 = st.tabs(["📊 Historikk", "📷 Portefølje"])
+tab1, tab2, tab3 = st.tabs(["📊 Historikk", "📷 Portefølje", "🏆 Toppliste"])
 
-# --- TAB 1 ---
+# --- TAB 1: HISTORIKK ---
 with tab1:
     st.header("Historisk kontantstrøm")
     uploaded_trans = st.file_uploader("Last opp transaksjons-CSV", type=["csv", "txt"], key="trans")
@@ -328,7 +325,7 @@ with tab1:
                 
                 st.dataframe(df_year[['Dato', 'Verdipapir', 'Type', 'Netto_Mottatt', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
 
-# --- TAB 2 ---
+# --- TAB 2: PORTEFØLJE ---
 with tab2:
     st.header("Portefølje & Estimat")
     method = st.radio("Metode:", ["Last opp CSV", "Lim inn tekst"])
@@ -415,3 +412,72 @@ with tab2:
             st.metric("Estimert årlig inntekt", f"{total:,.0f} NOK")
             res_cols = [c for c in ['Verdipapir', 'Info', 'YoC %', 'Sum utbytte'] if c in edited_df.columns]
             st.dataframe(edited_df[res_cols].style.format({'YoC %': '{:.2f} %', 'Sum utbytte': '{:.0f} kr'}), width="stretch")
+
+# --- TAB 3: TOPPLISTE ---
+with tab3:
+    st.header("🏆 Toppliste: Mest innbringende aksjer")
+    
+    if not st.session_state['history_df'].empty:
+        df_hist = st.session_state['history_df'].copy()
+        
+        # 1. Analyser og finn utbyttene
+        df_divs = analyze_dividends(df_hist)
+        
+        if not df_divs.empty:
+            # 2. Bruk 'mapping' og 'normalize_string' for å rydde opp i navnene
+            # Hvis bruker har koblet MPCC -> MPC Container Ships i Tab 2, brukes det her også.
+            manual_map = st.session_state['mapping']
+            
+            def get_clean_name(name):
+                # Sjekk manuell kobling
+                if name in manual_map: return manual_map[name]
+                return name
+            
+            df_divs['CleanName'] = df_divs['Verdipapir'].apply(get_clean_name)
+            
+            # Smart-sammenslåing av like navn som IKKE er koblet manuelt (BWLPG vs BW LPG)
+            # Vi lager en normalisert nøkkel og grouper på den
+            df_divs['NormKey'] = df_divs['CleanName'].apply(normalize_string)
+            
+            # Finn det fineste navnet for hver normaliserte nøkkel (lengste navn vinner ofte)
+            key_to_display = {}
+            for key, group in df_divs.groupby('NormKey'):
+                # Finn det lengste navnet i gruppen som display name
+                best_name = max(group['CleanName'].unique(), key=len)
+                key_to_display[key] = best_name
+                
+            df_divs['DisplayName'] = df_divs['NormKey'].map(key_to_display)
+            
+            # 3. Filter på år
+            years = sorted(df_divs['År'].dropna().unique(), reverse=True)
+            filter_year = st.selectbox("Velg periode", ["Alle år"] + list(years))
+            
+            if filter_year != "Alle år":
+                df_view = df_divs[df_divs['År'] == filter_year]
+            else:
+                df_view = df_divs
+            
+            # 4. Group og Sum
+            top_list = df_view.groupby('DisplayName')['Netto_Mottatt'].sum().reset_index()
+            top_list = top_list.sort_values('Netto_Mottatt', ascending=False).reset_index(drop=True)
+            top_list.columns = ['Selskap', 'Totalt Mottatt']
+            
+            # 5. Vis Graf og Tabell
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("Grafisk oversikt")
+                # Begrens til topp 20 for ryddig graf
+                fig = px.bar(top_list.head(20), x='Totalt Mottatt', y='Selskap', orientation='h', 
+                             title=f"Topp 20 Utbytteaksjer ({filter_year})", text_auto='.2s')
+                fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
+                st.plotly_chart(fig, width="stretch")
+                
+            with col2:
+                st.subheader("Tabell")
+                st.dataframe(top_list.style.format({'Totalt Mottatt': '{:,.0f} kr'}), width="stretch")
+                
+        else:
+            st.warning("Fant ingen utbytter i historikken.")
+    else:
+        st.info("Du må laste opp en transaksjonsfil i 'Historikk'-fanen først.")
