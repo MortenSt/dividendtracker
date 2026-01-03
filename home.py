@@ -9,11 +9,11 @@ st.set_page_config(page_title="Min Utbytte-Tracker", layout="wide", page_icon="�
 # --- HJELPEFUNKSJONER ---
 
 def clean_currency(val):
-    """Renser tall fra Nordnet (f.eks '1 234,50' -> 1234.50)."""
+    """Renser tall fra Nordnet (f.eks '1 234,50' med harde mellomrom -> 1234.50)."""
     if isinstance(val, (int, float)):
         return float(val)
     if isinstance(val, str):
-        # Fjern hard spaces, vanlige mellomrom og bytt komma med punktum
+        # Fjern hard spaces (\xa0), vanlige mellomrom og bytt komma med punktum
         val = val.replace('\xa0', '').replace(' ', '').replace(',', '.')
         try:
             return float(val)
@@ -39,17 +39,27 @@ def load_robust_csv(uploaded_file):
 
 def parse_clipboard_text(text):
     """Parser tekst limt inn fra Nordnet 'Oversikt'-siden."""
-    # Ser etter mønsteret: Navn -> Valuta (NOK) -> Antall -> GAV
-    # Dette matcher formatet du sendte tidligere
-    pattern = r"([A-Za-z0-9\s\.\-]+)\nNOK\n([\d\s]+)\n([\d\s,]+)"
+    # Regex som ser etter mønsteret: Navn -> Valuta (NOK) -> Antall -> GAV
+    # Dette matcher formatet:
+    #   Himalaya Shipping
+    #   NOK
+    #   12 000
+    #   71,23
+    # Mønsteret [\d\s,\.\-]+ prøver å fange tallene selv om de har hard spaces
+    pattern = r"([A-Za-z0-9\s\.\-]+)\nNOK\n([\d\s\xa0]+)\n([\d\s,\.\xa0]+)"
     matches = re.findall(pattern, text)
     
     data = []
     for m in matches:
-        name = m[0].strip()
-        count = float(m[1].replace(" ", ""))
-        gav = float(m[2].replace(" ", "").replace(",", "."))
-        data.append({"Verdipapir": name, "Antall": count, "GAV": gav})
+        try:
+            name = m[0].strip()
+            # Bruk den robuste rensefunksjonen vår i stedet for enkel replace
+            count = clean_currency(m[1]) 
+            gav = clean_currency(m[2])
+            
+            data.append({"Verdipapir": name, "Antall": count, "GAV": gav})
+        except Exception:
+            continue # Hopper over linjer som feiler
     
     return pd.DataFrame(data)
 
@@ -157,7 +167,7 @@ with tab2:
         if paste_text:
             df_port = parse_clipboard_text(paste_text)
             if df_port.empty:
-                st.warning("Klarte ikke å finne data i teksten. Sjekk at du kopierte hele tabellen fra Nordnet.")
+                st.warning("Klarte ikke å finne data i teksten. Sjekk at du kopierte riktig område.")
     
     elif input_method == "Last opp CSV":
         st.info("Last opp CSV-filen fra 'CSV eksport'-knappen på portefølje-siden.")
@@ -167,10 +177,15 @@ with tab2:
             if not df_raw_port.empty:
                 # Enkel vask av portefølje-CSV
                 df_raw_port.columns = df_raw_port.columns.str.strip()
-                if 'Antall' in df_raw_port.columns:
-                    df_raw_port['Antall'] = df_raw_port['Antall'].apply(clean_currency)
-                if 'GAV' in df_raw_port.columns:
-                    df_raw_port['GAV'] = df_raw_port['GAV'].apply(clean_currency)
+                # Rens tallkolonner hvis de finnes
+                for col in ['Antall', 'GAV', 'Kostpris', 'Markedsverdi']:
+                     if col in df_raw_port.columns:
+                         df_raw_port[col] = df_raw_port[col].apply(clean_currency)
+                
+                # Sørg for at vi har 'Verdipapir'-kolonnen
+                if 'Verdipapir' not in df_raw_port.columns and 'Navn' in df_raw_port.columns:
+                    df_raw_port['Verdipapir'] = df_raw_port['Navn']
+                
                 df_port = df_raw_port
 
     # --- VISNING AV SNAPSHOT ---
@@ -184,7 +199,7 @@ with tab2:
         st.markdown("### 🔮 Estimat for neste 12 mnd")
         st.write("Fyll inn forventet utbytte per aksje i tabellen under:")
         
-        # Vis kun relevante kolonner hvis de finnes
+        # Vis kun relevante kolonner
         cols = [c for c in ['Verdipapir', 'Navn', 'Antall', 'GAV', 'Est. Utbytte'] if c in df_port.columns]
         edited_df = st.data_editor(df_port[cols])
         
