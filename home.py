@@ -3,11 +3,12 @@ import pandas as pd
 import re
 import plotly.express as px
 import numpy as np
+from datetime import datetime
 
 # --- OPPSETT ---
 st.set_page_config(page_title="Min utbytte-tracker", layout="wide", page_icon="📈")
 
-# --- FARGEPALETT (KONSISTENS) ---
+# --- FARGEPALETT ---
 COLOR_MAP_TYPES = {
     "Utbytte": "#00CC96",          # Grønn
     "Tilbakebetaling": "#636EFA",  # Blå
@@ -264,7 +265,7 @@ def analyze_dividends(df, mapping_dict):
     else: df_main['Kildeskatt'] = 0.0
     df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
     df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
-    df_main = df_main[df_main['Netto_Mottatt'] != 0] # Slipper gjennom negative
+    df_main = df_main[df_main['Netto_Mottatt'] != 0] 
     df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
     return df_main
 
@@ -295,7 +296,6 @@ def analyze_capital_gains(df_hist, mapping_dict, manual_adjustments=None):
 
 st.title("💰 Utbytte-dashboard")
 
-# --- VELKOMMEN & OPPSKRIFT ---
 with st.expander("👋 Ny her? Slik kommer du i gang (1-2-3)", expanded=True):
     st.markdown("""
     **Velkommen!** Denne appen gir deg full oversikt over dine utbytter, direkteavkastning og portefølje-sammensetning.
@@ -353,7 +353,7 @@ with tab1:
                     yearly_stats = df_result.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
                     fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type', 
                                        title="Utvikling år for år", text_auto='.2s',
-                                       color_discrete_map=COLOR_MAP_TYPES) # BRUKER FARGEKART
+                                       color_discrete_map=COLOR_MAP_TYPES)
                     st.plotly_chart(fig_trend, width="stretch")
                 
                 selected_year = st.selectbox("Velg år", years)
@@ -366,7 +366,7 @@ with tab1:
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
                 fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type', 
                              title=f"Per måned ({selected_year})", text_auto='.2s',
-                             color_discrete_map=COLOR_MAP_TYPES) # BRUKER FARGEKART
+                             color_discrete_map=COLOR_MAP_TYPES)
                 st.plotly_chart(fig, width="stretch")
                 st.dataframe(df_year[['Dato', 'Verdipapir', 'Type', 'Netto_Mottatt', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
 
@@ -503,7 +503,7 @@ with tab3:
                         st.rerun()
             
             with st.expander("🛠️ Juster inngangsverdi / Glemte kjøp"):
-                c1, c2, c3 = st.columns([2, 1, 1])
+                c1, c2, c3 = st.columns([2, 2, 1])
                 with c1: adj_name = st.selectbox("Velg aksje:", all_display_names)
                 with c2: adj_cost = st.number_input("Hva betalte du totalt? (kr)", min_value=0.0, step=1000.0)
                 with c3:
@@ -578,7 +578,7 @@ with tab3:
                 st.subheader(f"Utbytte-kongene ({filter_year})")
                 fig = px.bar(merged.head(20), x='Utbytte', y='Selskap', color='Status', orientation='h', 
                              title="Topp 20 Utbytte", text_auto='.2s', 
-                             color_discrete_map=COLOR_MAP_STATUS) # BRUKER FARGEKART
+                             color_discrete_map=COLOR_MAP_STATUS)
                 fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
                 st.plotly_chart(fig, width="stretch")
             with col2:
@@ -634,6 +634,60 @@ with tab3:
 with tab4:
     st.header("🧩 Portefølje-analyse")
     
+    # 1. CAGR-BEREGNING (NY SEKSJON)
+    if not st.session_state['history_df'].empty:
+        st.subheader("📈 Utvikling (CAGR)")
+        df_hist = st.session_state['history_df']
+        
+        # Finn netto innskudd
+        # Typer: PREMIEINNBETALING, INNSKUDD, OVERFØRING (INN), UTTAK (UT)
+        dep_types = ['PREMIEINNBETALING', 'INNSKUDD KONTANTER', 'Overføring via Trustly', 'INNBETALING']
+        wit_types = ['UTBETALING', 'UTTAK']
+        
+        # Filtrer transaksjoner
+        deps = df_hist[df_hist['Transaksjonstype'].isin(dep_types)]['Beløp_Clean'].sum()
+        # Uttak er ofte negative i beløp, så vi bare summerer. Hvis de er positive, må vi trekke fra.
+        # Sjekk fortegn i dine data: UTBETALING er negativt (-10000). Så sum() fungerer.
+        wits = df_hist[df_hist['Transaksjonstype'].isin(wit_types)]['Beløp_Clean'].sum()
+        
+        net_invested = deps + wits
+        
+        # Finn startdato (første innskudd)
+        first_date = None
+        if not deps == 0 and not df_hist[df_hist['Transaksjonstype'].isin(dep_types)].empty:
+            first_date = df_hist[df_hist['Transaksjonstype'].isin(dep_types)]['Dato'].min()
+        
+        # Hent porteføljeverdi
+        port_val = 0
+        if not st.session_state['portfolio_df'].empty:
+            port_val = st.session_state['portfolio_df']['Markedsverdi'].sum()
+            
+        # Input for kontanter
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            cash = st.number_input("💰 Kontanter på konto (kr):", min_value=0.0, step=100.0, help="Legg inn 'Tilgjengelig for handel' fra Nordnet.")
+        
+        end_value = port_val + cash
+        
+        if first_date and net_invested > 0:
+            days = (datetime.now() - first_date).days
+            years = days / 365.25
+            
+            if years > 0:
+                cagr = (end_value / net_invested)**(1/years) - 1
+                
+                with c2:
+                    st.metric("Netto Investert", f"{net_invested:,.0f} kr")
+                    st.caption(f"Startet: {first_date.strftime('%d.%m.%Y')} ({years:.1f} år siden)")
+                with c3:
+                    st.metric("Total Verdi (Nå)", f"{end_value:,.0f} kr")
+                    st.metric("CAGR (Årlig vekst)", f"{cagr:.2%}")
+        else:
+            st.info("Mangler data for å beregne CAGR (trenger innskuddshistorikk).")
+            
+        st.divider()
+
+    # 2. RESTEN AV ANALYSEN (Grafer)
     if not st.session_state['portfolio_df'].empty:
         df_an = st.session_state['portfolio_df'].copy()
         
@@ -677,7 +731,6 @@ with tab4:
         if 'Siste kurs' in df_an.columns:
              df_an = df_an[df_an['Siste kurs'] > 0].copy()
              df_an['YoC'] = (df_an['Est. Utbytte'] / df_an['GAV']) * 100
-             # Nå heter denne Yielden Direkteavkastning i teksten
              df_an['Direkteavkastning'] = (df_an['Est. Utbytte'] / df_an['Siste kurs']) * 100
              
              df_an = df_an.replace([np.inf, -np.inf], 0)
@@ -687,7 +740,7 @@ with tab4:
                 df_melt = df_yield.melt(id_vars=['Verdipapir'], value_vars=['YoC', 'Direkteavkastning'], var_name='Type', value_name='Prosent')
                 fig_yoc = px.bar(df_melt, x='Verdipapir', y='Prosent', color='Type', barmode='group',
                                  title="Avkastning på kostpris (YoC) vs Direkteavkastning",
-                                 color_discrete_map=COLOR_MAP_YIELD) # BRUKER FARGEKART
+                                 color_discrete_map=COLOR_MAP_YIELD)
                 st.plotly_chart(fig_yoc, width="stretch")
     else:
         st.info("Last opp portefølje i 'Portefølje'-fanen for å se analyse.")
