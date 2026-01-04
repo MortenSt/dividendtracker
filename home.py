@@ -142,21 +142,15 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
     if df_divs.empty: return df_portfolio, 0, [], [], []
 
-    # 1. Samle alle unike navn fra historikken (til dropdown)
     unique_hist = sorted(df_divs['Verdipapir'].unique())
     unique_port = sorted(df_portfolio['Verdipapir'].unique()) if not df_portfolio.empty else []
 
-    # 2. Auto-match
     auto_matches = auto_match_names(unique_hist, unique_port)
     
-    # 3. Apply mapping (Manuell -> Auto -> Original)
     def apply_mapping(name):
         return mapping_dict.get(name, name)
 
     df_divs['MappedName'] = df_divs['Verdipapir'].apply(apply_mapping)
-    
-    # Oppdater mapping med auto-matcher KUN der det ikke er manuelt overstyrt
-    # Dette er for beregningen, ikke for å lagre i session_state permanent (med mindre brukeren vil)
     df_divs['FinalName'] = df_divs['MappedName'].apply(lambda x: auto_matches.get(x, x))
     
     max_date = df_divs['Dato'].max()
@@ -205,16 +199,12 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
                 freq_info[name] = "Uregelmessig (TTM)"
 
     matched_names = []
-    
-    # Identifiser orphans
     port_set_norm = set([normalize_string(n) for n in unique_port])
     orphans = []
     
     for h_name in unique_hist:
-        # Hva blir dette navnet til slutt?
-        final_mapped = apply_mapping(h_name) # Manuell
-        final_mapped = auto_matches.get(final_mapped, final_mapped) # Auto
-        
+        final_mapped = apply_mapping(h_name)
+        final_mapped = auto_matches.get(final_mapped, final_mapped)
         if normalize_string(final_mapped) not in port_set_norm:
             orphans.append(h_name)
 
@@ -376,21 +366,17 @@ with tab2:
             
             c1, c2, c3 = st.columns([2, 2, 1])
             with c1:
-                # La brukeren velge fra ALLE historiske navn
                 all_hist = sorted(st.session_state['hist_names'])
-                # Prøv å sett default til første orphan hvis finnes
                 default_ix = 0
                 if st.session_state['orphans'] and st.session_state['orphans'][0] in all_hist:
                     default_ix = all_hist.index(st.session_state['orphans'][0])
                 
                 selected_ticker = st.selectbox("Ticker / Navn fra historikk", all_hist, index=default_ix)
                 
-                # Vis hva den er koblet til NÅ
                 current_map = st.session_state['mapping'].get(selected_ticker, None)
                 if current_map:
                     st.caption(f"Manuelt koblet til: **{current_map}**")
                 else:
-                    # Sjekk automatch
                     matches = auto_match_names([selected_ticker], st.session_state['port_names'])
                     if selected_ticker in matches:
                         st.caption(f"🤖 Automatisk koblet til: **{matches[selected_ticker]}**")
@@ -398,10 +384,8 @@ with tab2:
                         st.caption("⚠️ Ikke koblet mot noe")
 
             with c2:
-                # Hva skal den hete? Velg fra portefølje ELLER skriv fritt
                 suggestions = [""] + sorted(st.session_state['port_names'])
                 target_port = st.selectbox("Koble mot porteføljeaksje...", suggestions)
-                
                 custom_text = st.text_input("...eller skriv eget navn:", value=target_port if target_port else "")
             
             with c3:
@@ -445,19 +429,38 @@ with tab3:
     
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
-        
-        # Bruk mappingen på hele analysen
         df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
         
         if not df_divs.empty:
-            # Auto-normalisering for visning i toppliste (BWLPG = BW LPG)
+            # AUTO-NORMALISERING OG SAMMENSLÅING FOR VISNING
             df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
             key_to_display = {}
             for key, group in df_divs.groupby('NormKey'):
+                # Velg det lengste navnet som visningsnavn (ofte penest)
                 best_name = max(group['Verdipapir'].unique(), key=len)
                 key_to_display[key] = best_name
             df_divs['DisplayName'] = df_divs['NormKey'].map(key_to_display)
             
+            # --- NY KONSOLLIDERINGS-BOKS HER ---
+            all_display_names = sorted(df_divs['DisplayName'].unique())
+            
+            with st.expander("🛠️ Ser du duplikater? Slå dem sammen her"):
+                c1, c2, c3 = st.columns([2, 2, 1])
+                with c1:
+                    src_name = st.selectbox("Navn som skal fjernes/flettes:", all_display_names)
+                with c2:
+                    # Fjern valgt navn fra target-listen for å unngå sirkel
+                    targets = [n for n in all_display_names if n != src_name]
+                    target_name = st.selectbox("Navn det skal legges til i:", targets)
+                with c3:
+                    st.write("")
+                    st.write("")
+                    if st.button("Slå sammen"):
+                        # Legg til i mappingen: src -> target
+                        st.session_state['mapping'][src_name] = target_name
+                        st.rerun()
+            # -----------------------------------
+
             years = sorted(df_divs['År'].dropna().unique(), reverse=True)
             filter_year = st.selectbox("Velg periode", ["Alle år"] + list(years))
             
