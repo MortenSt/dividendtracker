@@ -73,12 +73,9 @@ def process_portfolio(df):
     df.columns = df.columns.str.strip()
     if 'Verdipapir' not in df.columns and 'Navn' in df.columns: df['Verdipapir'] = df['Navn']
     
-    # Prøv å finne Markedsverdi eller beregne den
-    # Fond bruker ofte 'Kostpris' istedenfor GAV
     if 'GAV' not in df.columns and 'Kostpris' in df.columns:
         df['GAV'] = df['Kostpris']
 
-    # Fond bruker ofte 'Verdi NOK' istedenfor Markedsverdi
     if 'Markedsverdi' not in df.columns:
         if 'Verdi' in df.columns: df['Markedsverdi'] = df['Verdi']
         elif 'Verdi NOK' in df.columns: df['Markedsverdi'] = df['Verdi NOK']
@@ -86,7 +83,6 @@ def process_portfolio(df):
     for col in ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris', 'Verdi NOK']:
         if col in df.columns: df[col] = df[col].apply(clean_currency)
     
-    # Fallback
     if 'Markedsverdi' not in df.columns:
         if 'Antall' in df.columns and 'Siste kurs' in df.columns:
             df['Markedsverdi'] = df['Antall'] * df['Siste kurs']
@@ -359,7 +355,8 @@ with tab2:
         if 'Info' not in df_port.columns: df_port['Info'] = "-"
         col_opt, col_btn = st.columns([2, 1])
         with col_opt:
-            est_method = st.radio("Metode:", ["Smart (Siste annualisert)", "Konservativ (Snitt siste år)", "TTM (Sum 12 mnd)"], horizontal=True)
+            # ENDRET REKKEFØLGE: TTM FØRST
+            est_method = st.radio("Metode:", ["TTM (Sum 12 mnd)", "Smart (Siste annualisert)", "Konservativ (Snitt siste år)"], horizontal=True)
         mapping = {"Smart (Siste annualisert)": "smart", "Konservativ (Snitt siste år)": "avg", "TTM (Sum 12 mnd)": "ttm"}
         
         if not st.session_state['history_df'].empty and df_port is not None:
@@ -432,8 +429,13 @@ with tab3:
     st.header("🏆 Toppliste: Totalt")
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
+        
         df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
-        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(df_hist, st.session_state['mapping'], st.session_state['manual_adj'])
+        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(
+            df_hist, 
+            st.session_state['mapping'], 
+            st.session_state['manual_adj']
+        )
         
         if not df_divs.empty:
             df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
@@ -589,23 +591,18 @@ with tab4:
     if not st.session_state['portfolio_df'].empty:
         df_an = st.session_state['portfolio_df'].copy()
         
-        # Beregn grunnlag
         df_an['Total Kost'] = df_an['Antall'] * df_an['GAV']
         df_an['Total Inntekt'] = df_an['Antall'] * df_an['Est. Utbytte']
         
-        # Filtrer vekk null-verdier for renere grafer
         df_an_cost = df_an[df_an['Total Kost'] > 0]
         df_an_val = df_an[df_an['Markedsverdi'] > 0]
         df_an_inc = df_an[df_an['Total Inntekt'] > 0]
         
-        # --- RAD 1: Verdi vs Kost ---
         c1, c2 = st.columns(2)
-        
         with c1:
             st.subheader("💰 Hvor er pengene nå? (Markedsverdi)")
             fig_val = px.pie(df_an_val, values='Markedsverdi', names='Verdipapir', hole=0.4)
             st.plotly_chart(fig_val, width="stretch")
-            
         with c2:
             st.subheader("💸 Hvor satset du? (Kostpris)")
             fig_cost = px.pie(df_an_cost, values='Total Kost', names='Verdipapir', hole=0.4)
@@ -613,7 +610,6 @@ with tab4:
             
         st.divider()
         
-        # --- RAD 2: Inntektskilden ---
         st.subheader("💵 Hvem betaler lønna di? (Utbytte-fordeling)")
         if not df_an_inc.empty:
             c_inc1, c_inc2 = st.columns([2, 1])
@@ -630,27 +626,22 @@ with tab4:
 
         st.divider()
 
-        # --- RAD 3: Yield on Cost (Bonus) ---
-        st.subheader("📈 Yield on Cost (Din rente) vs. Dagens rente")
-        
-        # Sjekk at vi ikke deler på 0
+        st.subheader("📈 Yield on Cost (Din avkastning) vs. Direkteavkastning (Marked)")
         df_an = df_an[df_an['GAV'] > 0].copy()
-        
         if 'Siste kurs' in df_an.columns:
              df_an = df_an[df_an['Siste kurs'] > 0].copy()
              df_an['YoC'] = (df_an['Est. Utbytte'] / df_an['GAV']) * 100
-             df_an['Yield'] = (df_an['Est. Utbytte'] / df_an['Siste kurs']) * 100
+             # Nå heter denne Yielden Direkteavkastning i teksten
+             df_an['Direkteavkastning'] = (df_an['Est. Utbytte'] / df_an['Siste kurs']) * 100
              
-             # Vasker data
              df_an = df_an.replace([np.inf, -np.inf], 0)
              df_yield = df_an[df_an['Total Inntekt'] > 0].sort_values('YoC', ascending=False)
              
              if not df_yield.empty:
-                df_melt = df_yield.melt(id_vars=['Verdipapir'], value_vars=['YoC', 'Yield'], var_name='Type', value_name='Prosent')
+                df_melt = df_yield.melt(id_vars=['Verdipapir'], value_vars=['YoC', 'Direkteavkastning'], var_name='Type', value_name='Prosent')
                 fig_yoc = px.bar(df_melt, x='Verdipapir', y='Prosent', color='Type', barmode='group',
-                                 title="Avkastning på investert kapital (YoC) vs Markedsrente",
-                                 color_discrete_map={"YoC": "#00CC96", "Yield": "#636EFA"})
+                                 title="Avkastning på kostpris (YoC) vs Direkteavkastning",
+                                 color_discrete_map={"YoC": "#00CC96", "Direkteavkastning": "#636EFA"})
                 st.plotly_chart(fig_yoc, width="stretch")
-        
     else:
         st.info("Last opp portefølje i 'Portefølje'-fanen for å se analyse.")
