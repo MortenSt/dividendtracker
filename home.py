@@ -13,6 +13,7 @@ def clean_currency(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     if isinstance(val, str):
+        # Behold minus-tegnet, men fjern mellomrom og valuta-tegn
         val = val.replace('\xa0', '').replace(' ', '').replace(',', '.')
         try: return float(val)
         except ValueError: return 0.0
@@ -144,7 +145,7 @@ def auto_match_names(history_names, portfolio_names):
 
 def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, method="smart"):
     if df_history.empty or df_portfolio.empty: return df_portfolio, 0, [], [], []
-    div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
+    div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL', 'MAK UTBYTTE']
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
     if df_divs.empty: return df_portfolio, 0, [], [], []
     unique_hist = sorted(df_divs['Verdipapir'].unique())
@@ -222,7 +223,8 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
 def analyze_dividends(df, mapping_dict):
     if 'Transaksjonstype' not in df.columns: return pd.DataFrame()
-    div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG']
+    # LAGT TIL 'MAK UTBYTTE' I LISTA OVER DIVIDEND TYPER
+    div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'MAK UTBYTTE']
     reinvest = df[(df['Transaksjonstype'] == 'REINVESTERT UTBYTTE') & (df['Beløp_Clean'] > 0)].copy()
     roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
     tax_types = ['KUPONGSKATT', 'KORR UTL KUPSKATT']
@@ -244,7 +246,7 @@ def analyze_dividends(df, mapping_dict):
     else: df_main['Kildeskatt'] = 0.0
     df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
     df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
-    df_main = df_main[df_main['Netto_Mottatt'] > 0]
+    df_main = df_main[df_main['Netto_Mottatt'] != 0] # Slipper gjennom negative, men fjerner rene nuller
     df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
     return df_main
 
@@ -355,7 +357,6 @@ with tab2:
         if 'Info' not in df_port.columns: df_port['Info'] = "-"
         col_opt, col_btn = st.columns([2, 1])
         with col_opt:
-            # ENDRET REKKEFØLGE: TTM FØRST
             est_method = st.radio("Metode:", ["TTM (Sum 12 mnd)", "Smart (Siste annualisert)", "Konservativ (Snitt siste år)"], horizontal=True)
         mapping = {"Smart (Siste annualisert)": "smart", "Konservativ (Snitt siste år)": "avg", "TTM (Sum 12 mnd)": "ttm"}
         
@@ -459,7 +460,7 @@ with tab3:
                         st.rerun()
             
             with st.expander("🛠️ Juster inngangsverdi / Glemte kjøp"):
-                c1, c2, c3 = st.columns([2, 1, 1])
+                c1, c2, c3 = st.columns([2, 2, 1])
                 with c1: adj_name = st.selectbox("Velg aksje:", all_display_names)
                 with c2: adj_cost = st.number_input("Hva betalte du totalt? (kr)", min_value=0.0, step=1000.0)
                 with c3:
