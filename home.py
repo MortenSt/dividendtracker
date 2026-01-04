@@ -71,34 +71,27 @@ def process_transactions(df):
 
 def process_portfolio(df):
     df.columns = df.columns.str.strip()
+    if 'Verdipapir' not in df.columns and 'Navn' in df.columns: df['Verdipapir'] = df['Navn']
     
-    # 1. Navne-mapping
-    if 'Verdipapir' not in df.columns and 'Navn' in df.columns: 
-        df['Verdipapir'] = df['Navn']
-        
-    # 2. Kostpris-mapping (Fond bruker 'Kostpris', Aksjer bruker 'GAV')
+    # Prøv å finne Markedsverdi eller beregne den
+    # Fond bruker ofte 'Kostpris' istedenfor GAV
     if 'GAV' not in df.columns and 'Kostpris' in df.columns:
         df['GAV'] = df['Kostpris']
-    
-    # 3. Verdi-mapping (Fond bruker 'Verdi NOK', Aksjer bruker 'Verdi' eller 'Markedsverdi')
+
+    # Fond bruker ofte 'Verdi NOK' istedenfor Markedsverdi
     if 'Markedsverdi' not in df.columns:
-        if 'Verdi' in df.columns: 
-            df['Markedsverdi'] = df['Verdi']
-        elif 'Verdi NOK' in df.columns: 
-            df['Markedsverdi'] = df['Verdi NOK']
-            
-    # 4. Rensing av tall
-    cols_to_clean = ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris', 'Verdi NOK']
-    for col in cols_to_clean:
-        if col in df.columns: 
-            df[col] = df[col].apply(clean_currency)
-            
-    # 5. Fallback beregning
+        if 'Verdi' in df.columns: df['Markedsverdi'] = df['Verdi']
+        elif 'Verdi NOK' in df.columns: df['Markedsverdi'] = df['Verdi NOK']
+
+    for col in ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris', 'Verdi NOK']:
+        if col in df.columns: df[col] = df[col].apply(clean_currency)
+    
+    # Fallback
     if 'Markedsverdi' not in df.columns:
         if 'Antall' in df.columns and 'Siste kurs' in df.columns:
             df['Markedsverdi'] = df['Antall'] * df['Siste kurs']
-        else: 
-            df['Markedsverdi'] = 0.0
+        else:
+            df['Markedsverdi'] = 0.0 
             
     return df
 
@@ -304,7 +297,6 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Historikk", "📷 Portefølje", "🏆 To
 # --- TAB 1 ---
 with tab1:
     st.header("Historisk kontantstrøm")
-    # TILLAT FLERE FILER
     uploaded_trans_files = st.file_uploader("Last opp transaksjons-CSV (kan velge flere)", type=["csv", "txt"], key="trans", accept_multiple_files=True)
     
     if uploaded_trans_files:
@@ -344,7 +336,6 @@ with tab2:
     df_port = pd.DataFrame()
     
     if method == "Last opp CSV (Aksjer/Fond)":
-        # TILLAT FLERE FILER
         uploaded_port_files = st.file_uploader("Last opp Aksje- og Fondsfiler", type=["csv", "txt"], key="port", accept_multiple_files=True)
         if uploaded_port_files:
             df_p_list = []
@@ -441,13 +432,8 @@ with tab3:
     st.header("🏆 Toppliste: Totalt")
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
-        
         df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
-        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(
-            df_hist, 
-            st.session_state['mapping'], 
-            st.session_state['manual_adj']
-        )
+        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(df_hist, st.session_state['mapping'], st.session_state['manual_adj'])
         
         if not df_divs.empty:
             df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
@@ -618,12 +604,12 @@ with tab4:
         with c1:
             st.subheader("💰 Hvor er pengene nå? (Markedsverdi)")
             fig_val = px.pie(df_an_val, values='Markedsverdi', names='Verdipapir', hole=0.4)
-            st.plotly_chart(fig_val, use_container_width=True)
+            st.plotly_chart(fig_val, width="stretch")
             
         with c2:
             st.subheader("💸 Hvor satset du? (Kostpris)")
             fig_cost = px.pie(df_an_cost, values='Total Kost', names='Verdipapir', hole=0.4)
-            st.plotly_chart(fig_cost, use_container_width=True)
+            st.plotly_chart(fig_cost, width="stretch")
             
         st.divider()
         
@@ -634,7 +620,7 @@ with tab4:
             with c_inc1:
                 fig_inc = px.pie(df_an_inc, values='Total Inntekt', names='Verdipapir', hole=0.4)
                 fig_inc.update_traces(textinfo='percent+label')
-                st.plotly_chart(fig_inc, use_container_width=True)
+                st.plotly_chart(fig_inc, width="stretch")
             with c_inc2:
                 st.write("Topp 5 bidragsytere:")
                 top_inc = df_an_inc.sort_values('Total Inntekt', ascending=False).head(5)
@@ -664,7 +650,7 @@ with tab4:
                 fig_yoc = px.bar(df_melt, x='Verdipapir', y='Prosent', color='Type', barmode='group',
                                  title="Avkastning på investert kapital (YoC) vs Markedsrente",
                                  color_discrete_map={"YoC": "#00CC96", "Yield": "#636EFA"})
-                st.plotly_chart(fig_yoc, use_container_width=True)
+                st.plotly_chart(fig_yoc, width="stretch")
         
     else:
         st.info("Last opp portefølje i 'Portefølje'-fanen for å se analyse.")
