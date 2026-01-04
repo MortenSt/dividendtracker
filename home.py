@@ -19,6 +19,7 @@ def clean_currency(val):
     return 0.0
 
 def normalize_string(text):
+    """Aggressiv navnevask."""
     if not isinstance(text, str): return str(text)
     text = text.lower()
     suffixes = [r'\sasa$', r'\sas$', r'\sltd$', r'\scorp$', r'\sab$', r'\splc$', r'\sinc$', r'\sclass a$', r'\sa$']
@@ -31,6 +32,7 @@ def smart_fill_name(row):
     verdipapir = row.get('Verdipapir', '')
     if pd.notna(verdipapir) and str(verdipapir).strip() != "" and str(verdipapir).lower() != "nan":
         return str(verdipapir).strip()
+    
     tekst = str(row.get('Transaksjonstekst', ''))
     if "aksjeutlån" in str(row.get('Transaksjonstype', '')).lower():
         clean_text = re.sub(r'\s-\s\d{4}Q\d', '', tekst)
@@ -49,6 +51,7 @@ def load_robust_csv(uploaded_file):
         uploaded_file.seek(0)
         if '\t' in sample: separators = ['\t'] + separators
     except: uploaded_file.seek(0)
+
     for enc in encodings:
         for sep in separators:
             try:
@@ -72,24 +75,18 @@ def process_transactions(df):
 def process_portfolio(df):
     df.columns = df.columns.str.strip()
     if 'Verdipapir' not in df.columns and 'Navn' in df.columns: df['Verdipapir'] = df['Navn']
-    
-    # Prøv å finne Markedsverdi eller beregne den
     for col in ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris']:
         if col in df.columns: df[col] = df[col].apply(clean_currency)
-    
+        
     if 'Markedsverdi' not in df.columns:
-        if 'Verdi' in df.columns:
-            df['Markedsverdi'] = df['Verdi']
+        if 'Verdi' in df.columns: df['Markedsverdi'] = df['Verdi']
         elif 'Antall' in df.columns and 'Siste kurs' in df.columns:
             df['Markedsverdi'] = df['Antall'] * df['Siste kurs']
-        else:
-            df['Markedsverdi'] = 0.0 # Kan ikke beregne
+        else: df['Markedsverdi'] = 0.0
             
     return df
 
 def parse_clipboard_text(text):
-    # Prøv å parse en enkel liste, eller en mer detaljert en
-    # Pattern 1: Navn, Valuta, Antall, GAV...
     pattern = r"([A-Za-z0-9\s\.\-]+)\nNOK\n([\d\s\xa0]+)\n([\d\s,\.\xa0]+)"
     matches = re.findall(pattern, text)
     data = []
@@ -98,7 +95,6 @@ def parse_clipboard_text(text):
             name = m[0].strip()
             count = clean_currency(m[1])
             gav = clean_currency(m[2])
-            # Vi mangler markedsverdi i dette enkle patternet, men vi prøver
             data.append({"Verdipapir": name, "Antall": count, "GAV": gav, "Markedsverdi": 0.0})
         except: continue
     return pd.DataFrame(data)
@@ -107,19 +103,23 @@ def detect_frequency_and_volatility(df_stock):
     real_div_types = ['UTBYTTE', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL', 'REINVESTERT UTBYTTE']
     df_dates = df_stock[df_stock['Transaksjonstype'].isin(real_div_types)]
     if df_dates.empty: df_dates = df_stock
+
     dates = df_dates['Dato'].dt.date.unique()
     dates.sort()
     if len(dates) < 2: return "Ukjent", 0, False
+    
     recent_dates = dates[-5:]
     diffs = []
     for i in range(1, len(recent_dates)):
         diffs.append((recent_dates[i] - recent_dates[i-1]).days)
     avg_diff = sum(diffs) / len(diffs)
+    
     if 20 <= avg_diff <= 45: freq, mult = "Månedlig", 12
     elif 70 <= avg_diff <= 110: freq, mult = "Kvartalsvis", 4
     elif 150 <= avg_diff <= 210: freq, mult = "Halvårlig", 2
     elif 330 <= avg_diff <= 400: freq, mult = "Årlig", 1
     else: freq, mult = "Uregelmessig", 0
+
     dps_series = df_stock.apply(lambda r: r['Beløp_Clean']/r['Antall'] if r['Antall']>0 else 0, axis=1)
     mean_dps = dps_series.mean()
     std_dev = dps_series.std()
@@ -143,35 +143,49 @@ def auto_match_names(history_names, portfolio_names):
 
 def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, method="smart"):
     if df_history.empty or df_portfolio.empty: return df_portfolio, 0, [], [], []
+
     div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
     df_divs = df_history[df_history['Transaksjonstype'].isin(div_types)].copy()
     if df_divs.empty: return df_portfolio, 0, [], [], []
+
     unique_hist = sorted(df_divs['Verdipapir'].unique())
     unique_port = sorted(df_portfolio['Verdipapir'].unique()) if not df_portfolio.empty else []
+
     auto_matches = auto_match_names(unique_hist, unique_port)
-    def apply_mapping(name): return mapping_dict.get(name, name)
+    
+    def apply_mapping(name):
+        return mapping_dict.get(name, name)
+
     df_divs['MappedName'] = df_divs['Verdipapir'].apply(apply_mapping)
     df_divs['FinalName'] = df_divs['MappedName'].apply(lambda x: auto_matches.get(x, x))
+    
     max_date = df_divs['Dato'].max()
     cutoff_date = max_date - pd.DateOffset(days=380)
     df_recent = df_divs[df_divs['Dato'] >= cutoff_date].copy()
+    
     df_divs['DPS'] = df_divs.apply(lambda r: r['Beløp_Clean']/r['Antall'] if r['Antall']>0 else 0, axis=1)
     df_recent['DPS'] = df_recent.apply(lambda r: r['Beløp_Clean']/r['Antall'] if r['Antall']>0 else 0, axis=1)
+
     est_map = {}
     freq_info = {}
+    
     grouped_all = df_divs.groupby('FinalName')
     grouped_recent = df_recent.groupby('FinalName')['DPS'].sum().to_dict()
+
     for name, group in grouped_all:
         ttm_val = grouped_recent.get(name, 0.0)
         freq_name, multiplier, is_volatile = detect_frequency_and_volatility(group)
         volatility_tag = " ⚠️" if is_volatile else ""
+        
         recent_group = df_recent[df_recent['FinalName'] == name]
         avg_dps = recent_group['DPS'].mean() if not recent_group.empty else 0
+        
         last_dps = 0
         if not group.empty:
             real_divs = group[group['Transaksjonstype'].isin(['UTBYTTE', 'TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL'])]
             last_payment = real_divs.sort_values('Dato', ascending=False).iloc[0] if not real_divs.empty else group.sort_values('Dato', ascending=False).iloc[0]
             last_dps = last_payment['DPS']
+
         if method == "ttm":
             est_map[name] = ttm_val
             freq_info[name] = f"TTM"
@@ -189,14 +203,17 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
             else:
                 est_map[name] = ttm_val
                 freq_info[name] = "Uregelmessig (TTM)"
+
     matched_names = []
     port_set_norm = set([normalize_string(n) for n in unique_port])
     orphans = []
+    
     for h_name in unique_hist:
         final_mapped = apply_mapping(h_name)
         final_mapped = auto_matches.get(final_mapped, final_mapped)
         if normalize_string(final_mapped) not in port_set_norm:
             orphans.append(h_name)
+
     def get_estimate(row):
         p_name = row['Verdipapir']
         p_norm = normalize_string(p_name)
@@ -208,6 +225,7 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
                 matched_names.append(p_name)
                 return val
         return row.get('Est. Utbytte', 0.0)
+
     def get_freq_text(row):
         p_name = row['Verdipapir']
         p_norm = normalize_string(p_name)
@@ -215,8 +233,10 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
         for f_name, txt in freq_info.items():
             if normalize_string(f_name) == p_norm: return txt
         return "-"
+
     df_portfolio['Est. Utbytte'] = df_portfolio.apply(get_estimate, axis=1)
     df_portfolio['Info'] = df_portfolio.apply(get_freq_text, axis=1)
+    
     return df_portfolio, len(set(matched_names)), orphans, unique_port, unique_hist
 
 def analyze_dividends(df, mapping_dict):
@@ -225,46 +245,67 @@ def analyze_dividends(df, mapping_dict):
     reinvest = df[(df['Transaksjonstype'] == 'REINVESTERT UTBYTTE') & (df['Beløp_Clean'] > 0)].copy()
     roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
     tax_types = ['KUPONGSKATT', 'KORR UTL KUPSKATT']
+    
     df_divs = df[df['Transaksjonstype'].isin(div_types)].copy()
     if not reinvest.empty: df_divs = pd.concat([df_divs, reinvest])
     df_roc = df[df['Transaksjonstype'].isin(roc_types)].copy()
     df_tax = df[df['Transaksjonstype'].isin(tax_types)].copy()
+    
     df_divs['Type'] = 'Utbytte'
     df_divs.loc[df_divs['Transaksjonstype'] == 'TILBAKEBET. FOND AVG', 'Type'] = 'Returprovisjon'
     df_divs.loc[df_divs['Transaksjonstype'] == 'Utbetaling aksjeutlån', 'Type'] = 'Aksjeutlån'
     df_roc['Type'] = 'Tilbakebetaling'
     df_main = pd.concat([df_divs, df_roc])
     if df_main.empty: return pd.DataFrame()
+
     if 'Verifikationsnummer' in df_main.columns:
         df_main['Key'] = df_main['Verifikationsnummer'].fillna('Unknown')
         df_tax['Key'] = df_tax['Verifikationsnummer'].fillna('Unknown')
         tax_map = df_tax.groupby('Key')['Beløp_Clean'].sum()
         df_main['Kildeskatt'] = df_main['Key'].map(tax_map).fillna(0.0)
     else: df_main['Kildeskatt'] = 0.0
+
     df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
     df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
     df_main = df_main[df_main['Netto_Mottatt'] > 0]
+    
     df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
     return df_main
 
 def analyze_capital_gains(df_hist, mapping_dict, manual_adjustments=None):
     if df_hist.empty: return pd.DataFrame(), [], pd.DataFrame()
-    trade_types = ['KJØP', 'KJØPT', 'SALG', 'SOLGT', 'KÖP', 'SÄLJ', 'TEGNING', 'EMISJON', 'TILDELING', 'OVERFØRSEL', 'INNLØSNING', 'SPLITT INNLEGG VP', 'SPLITT UTTAK VP']
+    
+    trade_types = [
+        'KJØP', 'KJØPT', 'SALG', 'SOLGT', 'KÖP', 'SÄLJ', 
+        'TEGNING', 'EMISJON', 'TILDELING', 'OVERFØRSEL', 'INNLØSNING',
+        'SPLITT INNLEGG VP', 'SPLITT UTTAK VP'
+    ]
     df_trades = df_hist[df_hist['Transaksjonstype'].str.upper().isin(trade_types)].copy()
+    
     if manual_adjustments:
         adj_rows = []
         for adj in manual_adjustments:
-            adj_rows.append({'Dato': pd.Timestamp.min, 'Verdipapir': adj['name'], 'Transaksjonstype': 'KJØP (Manuell Start)', 'Beløp_Clean': -abs(adj['cost']), 'Antall': adj['qty']})
+            adj_rows.append({
+                'Dato': pd.Timestamp.min,
+                'Verdipapir': adj['name'],
+                'Transaksjonstype': 'KJØP (Manuell Start)',
+                'Beløp_Clean': -abs(adj['cost']), 
+                'Antall': adj['qty']
+            })
         if adj_rows:
             df_adj = pd.DataFrame(adj_rows)
             df_trades = pd.concat([df_adj, df_trades], ignore_index=True)
+
     if df_trades.empty: return pd.DataFrame(), [], pd.DataFrame()
+    
     df_trades['Verdipapir'] = df_trades['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
+    
     sales = df_trades[df_trades['Transaksjonstype'].str.upper().isin(['SALG', 'SÄLJ', 'SOLGT'])]
     has_sales = sales['Verdipapir'].unique()
-    # Netto cashflow (Handelsresultat)
+    
     gains = df_trades.groupby('Verdipapir')['Beløp_Clean'].sum().reset_index()
     gains.columns = ['Verdipapir', 'Handelsresultat']
+    
     return gains, has_sales, df_trades
 
 # --- HOVEDAPPLIKASJON ---
@@ -272,7 +313,7 @@ def analyze_capital_gains(df_hist, mapping_dict, manual_adjustments=None):
 st.title("💰 Utbytte-dashboard")
 
 if 'history_df' not in st.session_state: st.session_state['history_df'] = pd.DataFrame()
-if 'portfolio_df' not in st.session_state: st.session_state['portfolio_df'] = pd.DataFrame() # Ny: lagre portefølje globalt
+if 'portfolio_df' not in st.session_state: st.session_state['portfolio_df'] = pd.DataFrame()
 if 'mapping' not in st.session_state: st.session_state['mapping'] = {}
 if 'orphans' not in st.session_state: st.session_state['orphans'] = []
 if 'port_names' not in st.session_state: st.session_state['port_names'] = []
@@ -281,6 +322,7 @@ if 'manual_adj' not in st.session_state: st.session_state['manual_adj'] = []
 
 st.sidebar.header("Innstillinger")
 konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
+
 if konto_type == "AF-konto": st.sidebar.warning("⚠️ **AF-konto:** 'Tilbakebetaling' er skattefritt.")
 else: st.sidebar.success(f"✅ **{konto_type}:** Alt behandles likt.")
 
@@ -328,9 +370,7 @@ with tab2:
         if paste_text: df_port = parse_clipboard_text(paste_text)
 
     if not df_port.empty:
-        # Lagre portefølje til session state for Tab 3
         st.session_state['portfolio_df'] = df_port.copy()
-
         if 'Est. Utbytte' not in df_port.columns: df_port['Est. Utbytte'] = 0.0
         if 'Info' not in df_port.columns: df_port['Info'] = "-"
         col_opt, col_btn = st.columns([2, 1])
@@ -422,7 +462,6 @@ with tab3:
                 key_to_display[key] = max(group['Verdipapir'].unique(), key=len)
             df_divs['DisplayName'] = df_divs['NormKey'].map(key_to_display)
             
-            # Konsolidering
             all_display_names = sorted(df_divs['DisplayName'].unique())
             with st.expander("🛠️ Ser du duplikater? Slå dem sammen her"):
                 c1, c2, c3 = st.columns([2, 2, 1])
@@ -437,7 +476,6 @@ with tab3:
                         st.session_state['mapping'][src_name] = target_name
                         st.rerun()
             
-            # Manuell justering av inngangsverdi
             with st.expander("🛠️ Juster inngangsverdi / Glemte kjøp"):
                 c1, c2, c3 = st.columns([2, 1, 1])
                 with c1: adj_name = st.selectbox("Velg aksje:", all_display_names)
@@ -461,57 +499,45 @@ with tab3:
             if filter_year != "Alle år": df_view = df_divs[df_divs['År'] == filter_year]
             else: df_view = df_divs
             
+            # 1. Start med UTBYTTE
             total_divs = df_view.groupby('DisplayName')['Netto_Mottatt'].sum().reset_index()
             total_divs.columns = ['Selskap', 'Utbytte']
             merged = total_divs.copy()
-            merged['Handelsresultat'] = 0.0
             
-            # --- HENT UREALISERT VERDI FRA PORTEFØLJE ---
-            # Dette er nøkkelen!
+            # 2. Map til Urealisert verdi (Portefølje)
             df_port_curr = st.session_state['portfolio_df']
-            
-            # Map portefølje-navn til DisplayName
             port_value_map = {}
             if not df_port_curr.empty and 'Markedsverdi' in df_port_curr.columns:
-                # Vi må normalisere porteføljenavnene også, og prøve å matche mot key_to_display
-                # ELLER: Vi bruker auto_matches logikken.
-                # Enklere: Loop gjennom porteføljen, normaliser navnet, se om det matcher en NormKey i div_table.
-                # Hvis ikke, er det en aksje som ikke har betalt utbytte i perioden? (Den dukker ikke opp i merged da).
-                # Men merged er basert på UTBYTTE. Hvis en aksje har 0 utbytte, er den ikke med.
-                # Bør vi inkludere aksjer uten utbytte i topplisten? Kanskje ikke, dette er en utbytte-tracker.
-                # Men hvis man har tjent masse på handel, bør den kanskje være med?
-                # La oss holde oss til utbytte-aksjer foreløpig.
-                
                 for idx, row in df_port_curr.iterrows():
                     p_name = row['Verdipapir']
                     val = row['Markedsverdi']
-                    
-                    # Normaliser
                     norm = normalize_string(p_name)
-                    
-                    # Finn hvilket DisplayName dette tilhører
-                    # Vi sjekker key_to_display map (NormKey -> DisplayName)
+                    # Finn mapping via key_to_display (som er bygget på dividends)
+                    # Hvis en aksje har utbytte, finnes den i key_to_display.
                     if norm in key_to_display:
                         disp = key_to_display[norm]
                         port_value_map[disp] = port_value_map.get(disp, 0) + val
-                    else:
-                        # Prøv å sjekke mot mapping_dict også?
-                        # Hvis 'MPCC' er mappet til 'MPC...', sjekk det.
-                        pass # Foreløpig kun de som matcher automatisk
-                        
-            # Legg til Markedsverdi i merged tabellen
+            
             merged['Markedsverdi'] = merged['Selskap'].map(port_value_map).fillna(0)
 
+            # 3. Flett inn GEVINST (Hvis 'Alle år')
             if not df_gains.empty and filter_year == "Alle år":
                 df_gains['NormKey'] = df_gains['Verdipapir'].apply(normalize_string)
                 df_gains['DisplayName'] = df_gains['NormKey'].map(key_to_display).fillna(df_gains['Verdipapir'])
                 total_gains = df_gains.groupby('DisplayName')['Handelsresultat'].sum().reset_index()
+                
+                # MERGE (Nå er Handelsresultat med i høyre tabell, ikke venstre)
                 merged = pd.merge(merged, total_gains, left_on='Selskap', right_on='DisplayName', how='outer')
                 merged['Selskap'] = merged['Selskap'].fillna(merged['DisplayName'])
                 merged = merged.drop(columns=['DisplayName'])
-                merged['Utbytte'] = merged['Utbytte'].fillna(0)
-                merged['Handelsresultat'] = merged['Handelsresultat'].fillna(0)
-                merged['Markedsverdi'] = merged['Markedsverdi'].fillna(0)
+                
+            else:
+                merged['Handelsresultat'] = 0.0
+
+            # Fyll NaN etter merge
+            merged['Utbytte'] = merged['Utbytte'].fillna(0)
+            merged['Handelsresultat'] = merged['Handelsresultat'].fillna(0)
+            merged['Markedsverdi'] = merged['Markedsverdi'].fillna(0)
 
             current_holdings = []
             if 'port_names' in st.session_state:
@@ -528,17 +554,9 @@ with tab3:
             
             merged['Status'] = merged['Selskap'].apply(get_status)
             
-            # --- TOTAL BEREGNING (FASITEN) ---
-            # Total = (Handelsresultat + Markedsverdi) + Utbytte
-            # Handelsresultat er (Salg - Kjøp). 
-            # For eide aksjer er dette negativt (kostpris).
-            # Markedsverdi er positivt.
-            # Summen blir (Salg - Kjøp + Markedsverdi) = Realisert + Urealisert Gevinst.
-            
             def calc_total(row):
-                # Gevinst (kurs) = Cashflow + Beholdningsverdi
-                kurs_gevinst = row['Handelsresultat'] + row['Markedsverdi']
-                return kurs_gevinst + row['Utbytte']
+                # Total = Utbytte + (Salg - Kjøp) + Verdi i dag
+                return row['Utbytte'] + row['Handelsresultat'] + row['Markedsverdi']
 
             if filter_year == "Alle år": 
                 merged['Totalavkastning'] = merged.apply(calc_total, axis=1)
@@ -559,11 +577,10 @@ with tab3:
             with col2:
                 st.subheader("Fasit (Total)")
                 cols_to_show = ['Selskap', 'Status', 'Utbytte']
-                if filter_year == "Alle år": cols_to_show += ['Totalavkastning'] # Forenklet tabell
+                if filter_year == "Alle år": cols_to_show += ['Totalavkastning']
                 st.dataframe(merged[cols_to_show].style.format({'Utbytte': '{:,.0f} kr', 'Totalavkastning': '{:,.0f} kr'}, na_rep="-"), width="stretch")
                 if filter_year == "Alle år": st.caption("* Totalavkastning = Utbytte + (Salg - Kjøp) + Dagens Verdi.")
 
-            # --- RØNTGEN ---
             st.divider()
             st.subheader("🔍 Dykk ned i tallene")
             selected_xray = st.selectbox("Velg selskap for å se detaljer:", merged['Selskap'].unique())
@@ -598,9 +615,8 @@ with tab3:
                         fig_holding = px.line(df_trades_xray, x='Dato', y='Beholdning', title="Aksjebeholdning over tid (Est.)", markers=True)
                         st.plotly_chart(fig_holding, width="stretch")
                         st.dataframe(df_trades_xray[['Dato', 'Verdipapir', 'Transaksjonstype', 'Beløp_Clean', 'Antall']].sort_values('Dato', ascending=False), width="stretch")
-                        tot_net = df_trades_xray['Beløp_Clean'].sum()
                         
-                        # Hent markedsverdi for denne aksjen for total-regnestykket i røntgen
+                        tot_net = df_trades_xray['Beløp_Clean'].sum()
                         curr_val = port_value_map.get(selected_xray, 0)
                         
                         st.metric("Handelsresultat (Cashflow)", f"{tot_net:,.0f} kr")
