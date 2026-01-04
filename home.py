@@ -269,11 +269,13 @@ def analyze_dividends(df, mapping_dict):
 def analyze_capital_gains(df_hist, mapping_dict, manual_adjustments=None):
     if df_hist.empty: return pd.DataFrame(), [], pd.DataFrame()
     
-    # Utvidet liste over handels-transaksjoner
+    # Utvidet liste over handels-transaksjoner (INKLUDERT SPLITT)
     trade_types = [
         'KJØP', 'KJØPT', 'SALG', 'SOLGT', 'KÖP', 'SÄLJ', 
-        'TEGNING', 'EMISJON', 'TILDELING', 'OVERFØRSEL', 'INNLØSNING'
+        'TEGNING', 'EMISJON', 'TILDELING', 'OVERFØRSEL', 'INNLØSNING',
+        'SPLITT INNLEGG VP', 'SPLITT UTTAK VP'
     ]
+    # Sjekk mot uppercase for sikkerhet
     df_trades = df_hist[df_hist['Transaksjonstype'].str.upper().isin(trade_types)].copy()
     
     # Manuelle justeringer
@@ -581,14 +583,22 @@ with tab3:
                     if not df_trades_xray.empty:
                         df_trades_xray = df_trades_xray.sort_values('Dato')
                         
-                        # Gjetting av flow for graf
-                        # Hvis beløp < 0 -> Kjøp -> Øker antall
-                        # Hvis beløp > 0 -> Salg -> Minsker antall
-                        # MEN, noen ganger er antall 0 i manuelle justeringer.
-                        # Vi må bruke Antall-kolonnen fra filen der den finnes.
-                        # For manuell justering har vi satt antall=0 foreløpig.
-                        
-                        df_trades_xray['Flow'] = df_trades_xray.apply(lambda x: abs(x['Antall']) if x['Beløp_Clean'] < 0 else -abs(x['Antall']), axis=1)
+                        # FLYT-LOGIKK MED SPLITT-STØTTE
+                        def get_flow(row):
+                            typ = str(row['Transaksjonstype']).upper()
+                            amt = row['Antall']
+                            val = row['Beløp_Clean']
+                            
+                            # 1. Splitt-logikk
+                            if 'INNLEGG' in typ: return abs(amt)
+                            if 'UTTAK' in typ: return -abs(amt)
+                            
+                            # 2. Handels-logikk
+                            if val < 0: return abs(amt) # Kjøp
+                            if val > 0: return -abs(amt) # Salg
+                            return 0 # Utbytte, etc som ikke endrer antall (men det er filtrert bort her uansett)
+
+                        df_trades_xray['Flow'] = df_trades_xray.apply(get_flow, axis=1)
                         df_trades_xray['Beholdning'] = df_trades_xray['Flow'].cumsum()
                         
                         fig_holding = px.line(df_trades_xray, x='Dato', y='Beholdning', title="Aksjebeholdning over tid (Est.)", markers=True)
