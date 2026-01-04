@@ -81,7 +81,6 @@ def process_portfolio(df):
         df['GAV'] = df['Kostpris']
     
     # 3. Verdi-mapping (Fond bruker 'Verdi NOK', Aksjer bruker 'Verdi' eller 'Markedsverdi')
-    # Vi prøver å finne en verdi-kolonne og kalle den 'Markedsverdi'
     if 'Markedsverdi' not in df.columns:
         if 'Verdi' in df.columns: 
             df['Markedsverdi'] = df['Verdi']
@@ -89,13 +88,12 @@ def process_portfolio(df):
             df['Markedsverdi'] = df['Verdi NOK']
             
     # 4. Rensing av tall
-    # Vi renser alle potensielle pengekollonner
     cols_to_clean = ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris', 'Verdi NOK']
     for col in cols_to_clean:
         if col in df.columns: 
             df[col] = df[col].apply(clean_currency)
             
-    # 5. Fallback beregning hvis Markedsverdi fortsatt mangler
+    # 5. Fallback beregning
     if 'Markedsverdi' not in df.columns:
         if 'Antall' in df.columns and 'Siste kurs' in df.columns:
             df['Markedsverdi'] = df['Antall'] * df['Siste kurs']
@@ -306,13 +304,22 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Historikk", "📷 Portefølje", "🏆 To
 # --- TAB 1 ---
 with tab1:
     st.header("Historisk kontantstrøm")
-    uploaded_trans = st.file_uploader("Last opp transaksjons-CSV", type=["csv", "txt"], key="trans")
-    if uploaded_trans:
-        df_raw = load_robust_csv(uploaded_trans)
-        if not df_raw.empty:
-            df_clean = process_transactions(df_raw)
-            st.session_state['history_df'] = df_clean
-            df_result = analyze_dividends(df_clean, st.session_state['mapping'])
+    # TILLAT FLERE FILER
+    uploaded_trans_files = st.file_uploader("Last opp transaksjons-CSV (kan velge flere)", type=["csv", "txt"], key="trans", accept_multiple_files=True)
+    
+    if uploaded_trans_files:
+        df_list = []
+        for f in uploaded_trans_files:
+            df_temp = load_robust_csv(f)
+            if not df_temp.empty:
+                df_clean = process_transactions(df_temp)
+                df_list.append(df_clean)
+        
+        if df_list:
+            df_total = pd.concat(df_list, ignore_index=True).drop_duplicates()
+            st.session_state['history_df'] = df_total
+            
+            df_result = analyze_dividends(df_total, st.session_state['mapping'])
             if not df_result.empty:
                 years = sorted(df_result['År'].dropna().unique(), reverse=True)
                 if len(years) > 1:
@@ -335,19 +342,26 @@ with tab2:
     st.header("Portefølje & Estimat")
     method = st.radio("Metode:", ["Last opp CSV (Aksjer/Fond)", "Lim inn tekst"])
     df_port = pd.DataFrame()
+    
     if method == "Last opp CSV (Aksjer/Fond)":
-        uploaded_port = st.file_uploader("Last opp CSV", type=["csv", "txt"], key="port")
-        if uploaded_port:
-            df_raw_port = load_robust_csv(uploaded_port)
-            if not df_raw_port.empty: df_port = process_portfolio(df_raw_port)
+        # TILLAT FLERE FILER
+        uploaded_port_files = st.file_uploader("Last opp Aksje- og Fondsfiler", type=["csv", "txt"], key="port", accept_multiple_files=True)
+        if uploaded_port_files:
+            df_p_list = []
+            for f in uploaded_port_files:
+                df_temp = load_robust_csv(f)
+                if not df_temp.empty:
+                    df_proc = process_portfolio(df_temp)
+                    df_p_list.append(df_proc)
+            
+            if df_p_list:
+                df_port = pd.concat(df_p_list, ignore_index=True).drop_duplicates()
+                
     else:
         paste_text = st.text_area("Lim inn:", height=150)
         if paste_text: df_port = parse_clipboard_text(paste_text)
 
     if not df_port.empty:
-        # Hvis det finnes en eksisterende portefølje, slå dem sammen?
-        # Enn så lenge: Erstatt. Men vi kan legge til append-logikk hvis du laster opp flere filer.
-        # For nå: Enkel håndtering (siste fil vinner)
         st.session_state['portfolio_df'] = df_port.copy()
 
         if 'Est. Utbytte' not in df_port.columns: df_port['Est. Utbytte'] = 0.0
