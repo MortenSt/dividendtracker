@@ -71,15 +71,37 @@ def process_transactions(df):
 
 def process_portfolio(df):
     df.columns = df.columns.str.strip()
-    if 'Verdipapir' not in df.columns and 'Navn' in df.columns: df['Verdipapir'] = df['Navn']
-    for col in ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris']:
-        if col in df.columns: df[col] = df[col].apply(clean_currency)
+    
+    # 1. Navne-mapping
+    if 'Verdipapir' not in df.columns and 'Navn' in df.columns: 
+        df['Verdipapir'] = df['Navn']
         
+    # 2. Kostpris-mapping (Fond bruker 'Kostpris', Aksjer bruker 'GAV')
+    if 'GAV' not in df.columns and 'Kostpris' in df.columns:
+        df['GAV'] = df['Kostpris']
+    
+    # 3. Verdi-mapping (Fond bruker 'Verdi NOK', Aksjer bruker 'Verdi' eller 'Markedsverdi')
+    # Vi prøver å finne en verdi-kolonne og kalle den 'Markedsverdi'
     if 'Markedsverdi' not in df.columns:
-        if 'Verdi' in df.columns: df['Markedsverdi'] = df['Verdi']
-        elif 'Antall' in df.columns and 'Siste kurs' in df.columns:
+        if 'Verdi' in df.columns: 
+            df['Markedsverdi'] = df['Verdi']
+        elif 'Verdi NOK' in df.columns: 
+            df['Markedsverdi'] = df['Verdi NOK']
+            
+    # 4. Rensing av tall
+    # Vi renser alle potensielle pengekollonner
+    cols_to_clean = ['Antall', 'GAV', 'Siste kurs', 'Markedsverdi', 'Verdi', 'Kostpris', 'Verdi NOK']
+    for col in cols_to_clean:
+        if col in df.columns: 
+            df[col] = df[col].apply(clean_currency)
+            
+    # 5. Fallback beregning hvis Markedsverdi fortsatt mangler
+    if 'Markedsverdi' not in df.columns:
+        if 'Antall' in df.columns and 'Siste kurs' in df.columns:
             df['Markedsverdi'] = df['Antall'] * df['Siste kurs']
-        else: df['Markedsverdi'] = 0.0
+        else: 
+            df['Markedsverdi'] = 0.0
+            
     return df
 
 def parse_clipboard_text(text):
@@ -311,10 +333,10 @@ with tab1:
 # --- TAB 2 ---
 with tab2:
     st.header("Portefølje & Estimat")
-    method = st.radio("Metode:", ["Last opp CSV", "Lim inn tekst"])
+    method = st.radio("Metode:", ["Last opp CSV (Aksjer/Fond)", "Lim inn tekst"])
     df_port = pd.DataFrame()
-    if method == "Last opp CSV":
-        uploaded_port = st.file_uploader("Last opp 'aksjelister...csv'", type=["csv", "txt"], key="port")
+    if method == "Last opp CSV (Aksjer/Fond)":
+        uploaded_port = st.file_uploader("Last opp CSV", type=["csv", "txt"], key="port")
         if uploaded_port:
             df_raw_port = load_robust_csv(uploaded_port)
             if not df_raw_port.empty: df_port = process_portfolio(df_raw_port)
@@ -323,6 +345,11 @@ with tab2:
         if paste_text: df_port = parse_clipboard_text(paste_text)
 
     if not df_port.empty:
+        # Hvis det finnes en eksisterende portefølje, slå dem sammen?
+        # Enn så lenge: Erstatt. Men vi kan legge til append-logikk hvis du laster opp flere filer.
+        # For nå: Enkel håndtering (siste fil vinner)
+        st.session_state['portfolio_df'] = df_port.copy()
+
         if 'Est. Utbytte' not in df_port.columns: df_port['Est. Utbytte'] = 0.0
         if 'Info' not in df_port.columns: df_port['Info'] = "-"
         col_opt, col_btn = st.columns([2, 1])
@@ -340,7 +367,6 @@ with tab2:
              st.session_state['orphans'] = orphans
              st.session_state['port_names'] = port_names
              st.session_state['hist_names'] = hist_names
-             # Update global portfolio state after calculation
              st.session_state['portfolio_df'] = df_port.copy()
 
         with col_btn:
@@ -401,8 +427,13 @@ with tab3:
     st.header("🏆 Toppliste: Totalt")
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
+        
         df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
-        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(df_hist, st.session_state['mapping'], st.session_state['manual_adj'])
+        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(
+            df_hist, 
+            st.session_state['mapping'], 
+            st.session_state['manual_adj']
+        )
         
         if not df_divs.empty:
             df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
@@ -602,21 +633,24 @@ with tab4:
         # --- RAD 3: Yield on Cost (Bonus) ---
         st.subheader("📈 Yield on Cost (Din rente) vs. Dagens rente")
         
-        df_an['YoC'] = (df_an['Est. Utbytte'] / df_an['GAV']) * 100
-        df_an['Yield'] = (df_an['Est. Utbytte'] / df_an['Siste kurs']) * 100
+        # Sjekk at vi ikke deler på 0
+        df_an = df_an[df_an['GAV'] > 0].copy()
         
-        # Vasker data for uendelige verdier (hvis GAV=0)
-        df_an = df_an.replace([np.inf, -np.inf], 0)
-        df_yield = df_an[df_an['Total Inntekt'] > 0].sort_values('YoC', ascending=False)
-        
-        if not df_yield.empty:
-            # Smelt data for å få grouped bar chart
-            df_melt = df_yield.melt(id_vars=['Verdipapir'], value_vars=['YoC', 'Yield'], var_name='Type', value_name='Prosent')
-            
-            fig_yoc = px.bar(df_melt, x='Verdipapir', y='Prosent', color='Type', barmode='group',
-                             title="Avkastning på investert kapital (YoC) vs Markedsrente",
-                             color_discrete_map={"YoC": "#00CC96", "Yield": "#636EFA"})
-            st.plotly_chart(fig_yoc, use_container_width=True)
+        if 'Siste kurs' in df_an.columns:
+             df_an = df_an[df_an['Siste kurs'] > 0].copy()
+             df_an['YoC'] = (df_an['Est. Utbytte'] / df_an['GAV']) * 100
+             df_an['Yield'] = (df_an['Est. Utbytte'] / df_an['Siste kurs']) * 100
+             
+             # Vasker data
+             df_an = df_an.replace([np.inf, -np.inf], 0)
+             df_yield = df_an[df_an['Total Inntekt'] > 0].sort_values('YoC', ascending=False)
+             
+             if not df_yield.empty:
+                df_melt = df_yield.melt(id_vars=['Verdipapir'], value_vars=['YoC', 'Yield'], var_name='Type', value_name='Prosent')
+                fig_yoc = px.bar(df_melt, x='Verdipapir', y='Prosent', color='Type', barmode='group',
+                                 title="Avkastning på investert kapital (YoC) vs Markedsrente",
+                                 color_discrete_map={"YoC": "#00CC96", "Yield": "#636EFA"})
+                st.plotly_chart(fig_yoc, use_container_width=True)
         
     else:
         st.info("Last opp portefølje i 'Portefølje'-fanen for å se analyse.")
