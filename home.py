@@ -6,7 +6,28 @@ import numpy as np
 
 # --- OPPSETT ---
 st.set_page_config(page_title="Min utbytte-tracker", layout="wide", page_icon="📈")
+# ... (etter st.set_page_config og imports) ...
 
+st.title("💰 Utbytte-dashboard")
+
+# --- VELKOMMEN & OPPSKRIFT ---
+with st.expander("👋 Ny her? Slik kommer du i gang (1-2-3)", expanded=True):
+    st.markdown("""
+    **Velkommen!** Denne appen gir deg full oversikt over dine utbytter, direkteavkastning og portefølje-sammensetning.
+    
+    ### 1. Last ned data fra Nordnet 📥
+    For å bruke appen trenger du to filer fra Nordnet (logg inn på PC):
+    * **Transaksjoner:** Gå til *Mine Sider* -> *Transaksjoner og sluttsedler*. Velg en lang tidsperiode (f.eks. fra start) og trykk **"Eksporter til CSV"**.
+    * **Portefølje:** Gå til *Mine Sider* -> *Porteføljeoversikt*. Trykk på de tre prikkene/menyen til høyre for "Kjøp/Salg"-knappene og velg **"Eksporter til CSV"**. (Gjør dette for både *Aksjer* og *Fond* hvis du har begge).
+    
+    ### 2. Last opp filene her i appen 📤
+    * Gå til fanen **"📊 Historikk"** og last opp transaksjonsfilen din.
+    * Gå til fanen **"📷 Portefølje"** og last opp porteføljefilen(e).
+    
+    ### 3. Nyt analysen! 🚀
+    * Sjekk **"🏆 Toppliste"** for å se hvilke aksjer som har betalt deg mest.
+    * Bruk **"🧩 Analyse"** for å se om du lever av utbytte eller håp (Yield on Cost vs. Markedet).
+    """)
 # --- HJELPEFUNKSJONER ---
 
 def clean_currency(val):
