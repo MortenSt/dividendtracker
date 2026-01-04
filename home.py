@@ -6,35 +6,33 @@ import numpy as np
 
 # --- OPPSETT ---
 st.set_page_config(page_title="Min utbytte-tracker", layout="wide", page_icon="📈")
-# ... (etter st.set_page_config og imports) ...
 
-st.title("💰 Utbytte-dashboard")
+# --- FARGEPALETT (KONSISTENS) ---
+COLOR_MAP_TYPES = {
+    "Utbytte": "#00CC96",          # Grønn
+    "Tilbakebetaling": "#636EFA",  # Blå
+    "Returprovisjon": "#FFA15A",   # Oransje
+    "Aksjeutlån": "#AB63FA",       # Lilla
+    "Ukjent": "#7F7F7F"            # Grå
+}
 
-# --- VELKOMMEN & OPPSKRIFT ---
-with st.expander("👋 Ny her? Slik kommer du i gang (1-2-3)", expanded=True):
-    st.markdown("""
-    **Velkommen!** Denne appen gir deg full oversikt over dine utbytter, direkteavkastning og portefølje-sammensetning.
-    
-    ### 1. Last ned data fra Nordnet 📥
-    For å bruke appen trenger du to filer fra Nordnet (logg inn på PC):
-    * **Transaksjoner:** Gå til *Mine Sider* -> *Transaksjoner og sluttsedler*. Velg en lang tidsperiode (f.eks. fra start) og trykk **"Eksporter til CSV"**.
-    * **Portefølje:** Gå til *Mine Sider* -> *Porteføljeoversikt*. Trykk på de tre prikkene/menyen til høyre for "Kjøp/Salg"-knappene og velg **"Eksporter til CSV"**. (Gjør dette for både *Aksjer* og *Fond* hvis du har begge).
-    
-    ### 2. Last opp filene her i appen 📤
-    * Gå til fanen **"📊 Historikk"** og last opp transaksjonsfilen din.
-    * Gå til fanen **"📷 Portefølje"** og last opp porteføljefilen(e).
-    
-    ### 3. Nyt analysen! 🚀
-    * Sjekk **"🏆 Toppliste"** for å se hvilke aksjer som har betalt deg mest.
-    * Bruk **"🧩 Analyse"** for å se om du lever av utbytte eller håp (Yield on Cost vs. Markedet).
-    """)
+COLOR_MAP_STATUS = {
+    "🟢 Eies": "#00CC96", 
+    "🟡 Delvis solgt": "#FFA15A", 
+    "🔴 Avsluttet": "#EF553B"
+}
+
+COLOR_MAP_YIELD = {
+    "YoC": "#00CC96", 
+    "Direkteavkastning": "#636EFA"
+}
+
 # --- HJELPEFUNKSJONER ---
 
 def clean_currency(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     if isinstance(val, str):
-        # Behold minus-tegnet, men fjern mellomrom og valuta-tegn
         val = val.replace('\xa0', '').replace(' ', '').replace(',', '.')
         try: return float(val)
         except ValueError: return 0.0
@@ -244,7 +242,6 @@ def estimate_dividends_from_history(df_history, df_portfolio, mapping_dict, meth
 
 def analyze_dividends(df, mapping_dict):
     if 'Transaksjonstype' not in df.columns: return pd.DataFrame()
-    # LAGT TIL 'MAK UTBYTTE' I LISTA OVER DIVIDEND TYPER
     div_types = ['UTBYTTE', 'Utbetaling aksjeutlån', 'TILBAKEBET. FOND AVG', 'MAK UTBYTTE']
     reinvest = df[(df['Transaksjonstype'] == 'REINVESTERT UTBYTTE') & (df['Beløp_Clean'] > 0)].copy()
     roc_types = ['TILBAKEBETALING', 'TILBAKEBETALING AV KAPITAL']
@@ -267,7 +264,7 @@ def analyze_dividends(df, mapping_dict):
     else: df_main['Kildeskatt'] = 0.0
     df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
     df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
-    df_main = df_main[df_main['Netto_Mottatt'] != 0] # Slipper gjennom negative, men fjerner rene nuller
+    df_main = df_main[df_main['Netto_Mottatt'] != 0] # Slipper gjennom negative
     df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
     return df_main
 
@@ -297,6 +294,25 @@ def analyze_capital_gains(df_hist, mapping_dict, manual_adjustments=None):
 # --- HOVEDAPPLIKASJON ---
 
 st.title("💰 Utbytte-dashboard")
+
+# --- VELKOMMEN & OPPSKRIFT ---
+with st.expander("👋 Ny her? Slik kommer du i gang (1-2-3)", expanded=True):
+    st.markdown("""
+    **Velkommen!** Denne appen gir deg full oversikt over dine utbytter, direkteavkastning og portefølje-sammensetning.
+    
+    ### 1. Last ned data fra Nordnet 📥
+    For å bruke appen trenger du to filer fra Nordnet (logg inn på PC):
+    * **Transaksjoner:** Gå til *Mine Sider* -> *Transaksjoner og sluttsedler*. Velg en lang tidsperiode (f.eks. fra start) og trykk **"Eksporter til CSV"**.
+    * **Portefølje:** Gå til *Mine Sider* -> *Porteføljeoversikt*. Trykk på de tre prikkene/menyen til høyre for "Kjøp/Salg"-knappene og velg **"Eksporter til CSV"**. (Gjør dette for både *Aksjer* og *Fond* hvis du har begge).
+    
+    ### 2. Last opp filene her i appen 📤
+    * Gå til fanen **"📊 Historikk"** og last opp transaksjonsfilen din.
+    * Gå til fanen **"📷 Portefølje"** og last opp porteføljefilen(e).
+    
+    ### 3. Nyt analysen! 🚀
+    * Sjekk **"🏆 Toppliste"** for å se hvilke aksjer som har betalt deg mest.
+    * Bruk **"🧩 Analyse"** for å se om du lever av utbytte eller håp (Yield on Cost vs. Markedet).
+    """)
 
 if 'history_df' not in st.session_state: st.session_state['history_df'] = pd.DataFrame()
 if 'portfolio_df' not in st.session_state: st.session_state['portfolio_df'] = pd.DataFrame()
@@ -335,16 +351,22 @@ with tab1:
                 years = sorted(df_result['År'].dropna().unique(), reverse=True)
                 if len(years) > 1:
                     yearly_stats = df_result.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
-                    fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type', title="Utvikling år for år", text_auto='.2s')
+                    fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type', 
+                                       title="Utvikling år for år", text_auto='.2s',
+                                       color_discrete_map=COLOR_MAP_TYPES) # BRUKER FARGEKART
                     st.plotly_chart(fig_trend, width="stretch")
+                
                 selected_year = st.selectbox("Velg år", years)
                 df_year = df_result[df_result['År'] == selected_year]
                 stats = df_year.groupby('Type')['Netto_Mottatt'].sum()
                 cols = st.columns(len(stats) + 1)
                 cols[0].metric("Totalt", f"{df_year['Netto_Mottatt'].sum():,.0f} NOK")
                 for i, (k, v) in enumerate(stats.items()): cols[i+1].metric(k, f"{v:,.0f} NOK")
+                
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
-                fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type', title=f"Per måned ({selected_year})", text_auto='.2s')
+                fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type', 
+                             title=f"Per måned ({selected_year})", text_auto='.2s',
+                             color_discrete_map=COLOR_MAP_TYPES) # BRUKER FARGEKART
                 st.plotly_chart(fig, width="stretch")
                 st.dataframe(df_year[['Dato', 'Verdipapir', 'Type', 'Netto_Mottatt', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
 
@@ -481,7 +503,7 @@ with tab3:
                         st.rerun()
             
             with st.expander("🛠️ Juster inngangsverdi / Glemte kjøp"):
-                c1, c2, c3 = st.columns([2, 2, 1])
+                c1, c2, c3 = st.columns([2, 1, 1])
                 with c1: adj_name = st.selectbox("Velg aksje:", all_display_names)
                 with c2: adj_cost = st.number_input("Hva betalte du totalt? (kr)", min_value=0.0, step=1000.0)
                 with c3:
@@ -554,7 +576,9 @@ with tab3:
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader(f"Utbytte-kongene ({filter_year})")
-                fig = px.bar(merged.head(20), x='Utbytte', y='Selskap', color='Status', orientation='h', title="Topp 20 Utbytte", text_auto='.2s', color_discrete_map={"🟢 Eies": "#00CC96", "🟡 Delvis solgt": "#FFA15A", "🔴 Avsluttet": "#EF553B"})
+                fig = px.bar(merged.head(20), x='Utbytte', y='Selskap', color='Status', orientation='h', 
+                             title="Topp 20 Utbytte", text_auto='.2s', 
+                             color_discrete_map=COLOR_MAP_STATUS) # BRUKER FARGEKART
                 fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
                 st.plotly_chart(fig, width="stretch")
             with col2:
@@ -663,7 +687,7 @@ with tab4:
                 df_melt = df_yield.melt(id_vars=['Verdipapir'], value_vars=['YoC', 'Direkteavkastning'], var_name='Type', value_name='Prosent')
                 fig_yoc = px.bar(df_melt, x='Verdipapir', y='Prosent', color='Type', barmode='group',
                                  title="Avkastning på kostpris (YoC) vs Direkteavkastning",
-                                 color_discrete_map={"YoC": "#00CC96", "Direkteavkastning": "#636EFA"})
+                                 color_discrete_map=COLOR_MAP_YIELD) # BRUKER FARGEKART
                 st.plotly_chart(fig_yoc, width="stretch")
     else:
         st.info("Last opp portefølje i 'Portefølje'-fanen for å se analyse.")
