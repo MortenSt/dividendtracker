@@ -263,30 +263,45 @@ def analyze_dividends(df, mapping_dict):
     df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
     df_main = df_main[df_main['Netto_Mottatt'] > 0]
     
-    # BRUK MAPPINGEN
     df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
     return df_main
 
-def analyze_capital_gains(df_hist, mapping_dict):
-    """Beregner handelsresultat og salgsaktivitet."""
-    if df_hist.empty: return pd.DataFrame()
+def analyze_capital_gains(df_hist, mapping_dict, manual_adjustments=None):
+    if df_hist.empty: return pd.DataFrame(), [], pd.DataFrame()
     
-    trade_types = ['KJØP', 'SALG', 'KÖP', 'SÄLJ']
+    # Utvidet liste over handels-transaksjoner
+    trade_types = [
+        'KJØP', 'KJØPT', 'SALG', 'SOLGT', 'KÖP', 'SÄLJ', 
+        'TEGNING', 'EMISJON', 'TILDELING', 'OVERFØRSEL', 'INNLØSNING'
+    ]
     df_trades = df_hist[df_hist['Transaksjonstype'].str.upper().isin(trade_types)].copy()
     
-    if df_trades.empty: return pd.DataFrame()
+    # Manuelle justeringer
+    if manual_adjustments:
+        adj_rows = []
+        for adj in manual_adjustments:
+            adj_rows.append({
+                'Dato': pd.Timestamp.min,
+                'Verdipapir': adj['name'],
+                'Transaksjonstype': 'KJØP (Manuell Start)',
+                'Beløp_Clean': -abs(adj['cost']), 
+                'Antall': adj['qty']
+            })
+        if adj_rows:
+            df_adj = pd.DataFrame(adj_rows)
+            df_trades = pd.concat([df_adj, df_trades], ignore_index=True)
+
+    if df_trades.empty: return pd.DataFrame(), [], pd.DataFrame()
     
     df_trades['Verdipapir'] = df_trades['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
     
-    # Sjekk om har solgt noe (for status)
-    sales = df_trades[df_trades['Transaksjonstype'].str.upper().isin(['SALG', 'SÄLJ'])]
+    sales = df_trades[df_trades['Transaksjonstype'].str.upper().isin(['SALG', 'SÄLJ', 'SOLGT'])]
     has_sales = sales['Verdipapir'].unique()
     
-    # Netto cashflow (Salg er +, Kjøp er -)
     gains = df_trades.groupby('Verdipapir')['Beløp_Clean'].sum().reset_index()
     gains.columns = ['Verdipapir', 'Handelsresultat']
     
-    return gains, has_sales
+    return gains, has_sales, df_trades
 
 # --- HOVEDAPPLIKASJON ---
 
@@ -297,6 +312,7 @@ if 'mapping' not in st.session_state: st.session_state['mapping'] = {}
 if 'orphans' not in st.session_state: st.session_state['orphans'] = []
 if 'port_names' not in st.session_state: st.session_state['port_names'] = []
 if 'hist_names' not in st.session_state: st.session_state['hist_names'] = []
+if 'manual_adj' not in st.session_state: st.session_state['manual_adj'] = [] 
 
 st.sidebar.header("Innstillinger")
 konto_type = st.sidebar.selectbox("Kontotype", ["IKZ", "ASK", "AF-konto"])
@@ -310,30 +326,24 @@ tab1, tab2, tab3 = st.tabs(["📊 Historikk", "📷 Portefølje", "🏆 Topplist
 with tab1:
     st.header("Historisk kontantstrøm")
     uploaded_trans = st.file_uploader("Last opp transaksjons-CSV", type=["csv", "txt"], key="trans")
-    
     if uploaded_trans:
         df_raw = load_robust_csv(uploaded_trans)
         if not df_raw.empty:
             df_clean = process_transactions(df_raw)
             st.session_state['history_df'] = df_clean
             df_result = analyze_dividends(df_clean, st.session_state['mapping'])
-            
             if not df_result.empty:
                 years = sorted(df_result['År'].dropna().unique(), reverse=True)
                 if len(years) > 1:
                     yearly_stats = df_result.groupby(['År', 'Type'])['Netto_Mottatt'].sum().reset_index()
-                    fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type',
-                                       title="Utvikling år for år", text_auto='.2s')
+                    fig_trend = px.bar(yearly_stats, x='År', y='Netto_Mottatt', color='Type', title="Utvikling år for år", text_auto='.2s')
                     st.plotly_chart(fig_trend, width="stretch")
-
                 selected_year = st.selectbox("Velg år", years)
                 df_year = df_result[df_result['År'] == selected_year]
-                
                 stats = df_year.groupby('Type')['Netto_Mottatt'].sum()
                 cols = st.columns(len(stats) + 1)
                 cols[0].metric("Totalt", f"{df_year['Netto_Mottatt'].sum():,.0f} NOK")
                 for i, (k, v) in enumerate(stats.items()): cols[i+1].metric(k, f"{v:,.0f} NOK")
-                
                 monthly = df_year.groupby(['Måned', 'Type'])['Netto_Mottatt'].sum().reset_index()
                 fig = px.bar(monthly, x='Måned', y='Netto_Mottatt', color='Type', title=f"Per måned ({selected_year})", text_auto='.2s')
                 st.plotly_chart(fig, width="stretch")
@@ -344,7 +354,6 @@ with tab2:
     st.header("Portefølje & Estimat")
     method = st.radio("Metode:", ["Last opp CSV", "Lim inn tekst"])
     df_port = pd.DataFrame()
-    
     if method == "Last opp CSV":
         uploaded_port = st.file_uploader("Last opp 'aksjelister...csv'", type=["csv", "txt"], key="port")
         if uploaded_port:
@@ -357,7 +366,6 @@ with tab2:
     if not df_port.empty:
         if 'Est. Utbytte' not in df_port.columns: df_port['Est. Utbytte'] = 0.0
         if 'Info' not in df_port.columns: df_port['Info'] = "-"
-            
         col_opt, col_btn = st.columns([2, 1])
         with col_opt:
             est_method = st.radio("Metode:", ["Smart (Siste annualisert)", "Konservativ (Snitt siste år)", "TTM (Sum 12 mnd)"], horizontal=True)
@@ -377,8 +385,7 @@ with tab2:
         with col_btn:
             st.write("")
             st.write("")
-            if not st.session_state['history_df'].empty:
-                st.button("🤖 Oppdater beregning")
+            if not st.session_state['history_df'].empty: st.button("🤖 Oppdater beregning")
 
         with st.expander("🔗 Koble navn / Overstyr automatikk", expanded=bool(st.session_state['orphans'])):
             c1, c2, c3 = st.columns([2, 2, 1])
@@ -394,12 +401,10 @@ with tab2:
                     matches = auto_match_names([selected_ticker], st.session_state['port_names'])
                     if selected_ticker in matches: st.caption(f"🤖 Auto: **{matches[selected_ticker]}**")
                     else: st.caption("⚠️ Ikke koblet")
-
             with c2:
                 suggestions = [""] + sorted(st.session_state['port_names'])
                 target_port = st.selectbox("Koble mot portefølje...", suggestions)
                 custom_text = st.text_input("...eller skriv nytt navn:", value=target_port if target_port else "")
-            
             with c3:
                 st.write("")
                 st.write("")
@@ -407,7 +412,6 @@ with tab2:
                     if custom_text.strip():
                         st.session_state['mapping'][selected_ticker] = custom_text.strip()
                         st.rerun()
-
             if st.session_state['mapping']:
                 st.write("---")
                 if st.button("Slett alle koblinger"):
@@ -421,7 +425,6 @@ with tab2:
             "Info": st.column_config.TextColumn(disabled=True),
         }
         edited_df = st.data_editor(df_port[cols], column_config=column_config, width="stretch")
-        
         if 'Antall' in edited_df.columns and 'Est. Utbytte' in edited_df.columns:
             edited_df['Sum utbytte'] = edited_df['Antall'] * edited_df['Est. Utbytte']
             if 'GAV' in edited_df.columns:
@@ -434,18 +437,18 @@ with tab2:
 # --- TAB 3: TOPPLISTE ---
 with tab3:
     st.header("🏆 Toppliste: Totalt")
-    
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
         
-        # 1. Hent Utbytter
+        # Bruk mapping
         df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
-        
-        # 2. Hent Gevinster og sjekk salg
-        df_gains, has_sales_list = analyze_capital_gains(df_hist, st.session_state['mapping'])
+        df_gains, has_sales_list, df_raw_trades = analyze_capital_gains(
+            df_hist, 
+            st.session_state['mapping'], 
+            st.session_state['manual_adj']
+        )
         
         if not df_divs.empty:
-            # Normaliser navn for visning
             df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
             key_to_display = {}
             for key, group in df_divs.groupby('NormKey'):
@@ -466,20 +469,41 @@ with tab3:
                     if st.button("Slå sammen"):
                         st.session_state['mapping'][src_name] = target_name
                         st.rerun()
+            
+            # --- JUSTERING AV INNGANGSVERDI ---
+            with st.expander("🛠️ Juster inngangsverdi / Glemte kjøp"):
+                st.write("Hvis gevinsten ser for høy ut, kan det være at kjøpet skjedde før historikken starter.")
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    adj_name = st.selectbox("Velg aksje:", all_display_names)
+                with c2:
+                    adj_cost = st.number_input("Hva betalte du totalt? (kr)", min_value=0.0, step=1000.0, help="Legg inn total sum du betalte for aksjene (positivt tall).")
+                with c3:
+                    st.write("")
+                    st.write("")
+                    if st.button("Legg til kostnad"):
+                        st.session_state['manual_adj'].append({
+                            'name': adj_name,
+                            'cost': adj_cost, 
+                            'qty': 0 
+                        })
+                        st.success("Lagt til!")
+                        st.rerun()
+                
+                if st.session_state['manual_adj']:
+                    st.write("Dine justeringer:")
+                    st.write(st.session_state['manual_adj'])
+                    if st.button("Nullstill justeringer"):
+                        st.session_state['manual_adj'] = []
+                        st.rerun()
 
             years = sorted(df_divs['År'].dropna().unique(), reverse=True)
             filter_year = st.selectbox("Velg periode", ["Alle år"] + list(years))
-            
             if filter_year != "Alle år": df_view = df_divs[df_divs['År'] == filter_year]
             else: df_view = df_divs
             
-            # Aggreger Utbytter
             total_divs = df_view.groupby('DisplayName')['Netto_Mottatt'].sum().reset_index()
             total_divs.columns = ['Selskap', 'Utbytte']
-            
-            # Aggreger Gevinster (kun relevant hvis 'Alle år' er valgt, ellers blir det rart med år vs total gevinst)
-            # Vi viser gevinst kolonnen kun hvis 'Alle år' er valgt, eller vi må filtrere trades på år.
-            # Enklest: Vis total gevinst uansett, men merk det. Eller kun ved 'Alle år'.
             
             merged = total_divs.copy()
             merged['Handelsresultat'] = 0.0
@@ -488,46 +512,33 @@ with tab3:
                 df_gains['NormKey'] = df_gains['Verdipapir'].apply(normalize_string)
                 df_gains['DisplayName'] = df_gains['NormKey'].map(key_to_display).fillna(df_gains['Verdipapir'])
                 total_gains = df_gains.groupby('DisplayName')['Handelsresultat'].sum().reset_index()
-                
                 merged = pd.merge(total_divs, total_gains, left_on='Selskap', right_on='DisplayName', how='outer')
                 merged['Selskap'] = merged['Selskap'].fillna(merged['DisplayName'])
                 merged = merged.drop(columns=['DisplayName'])
                 merged['Utbytte'] = merged['Utbytte'].fillna(0)
                 merged['Handelsresultat'] = merged['Handelsresultat'].fillna(0)
 
-            # --- STATUS SETTING ---
             current_holdings = []
             if 'port_names' in st.session_state:
                 current_holdings = [normalize_string(x) for x in st.session_state['port_names']]
-            
-            # Vi må også sjekke om det har vært salg på navnet (selv om navnet er normalisert)
-            # has_sales_list inneholder navn slik de var i transaksjonen (men mappet).
             has_sales_norm = [normalize_string(x) for x in has_sales_list]
 
             def get_status(name):
                 n_norm = normalize_string(name)
                 in_portfolio = n_norm in current_holdings
                 has_sold = n_norm in has_sales_norm
-                
                 if in_portfolio and has_sold: return "🟡 Delvis solgt"
                 if in_portfolio: return "🟢 Eies"
                 return "🔴 Avsluttet"
             
             merged['Status'] = merged['Selskap'].apply(get_status)
             
-            # --- TOTAL BEREGNING ---
-            # Totalavkastning (kun logisk for 'Alle år' og Avsluttet posisjon, men vi viser summen for alle)
-            # For åpne posisjoner er Handelsresultat bare cashflow (kjøpskostnad), ikke gevinst.
-            
             def calc_total(row):
-                if row['Status'] == "🔴 Avsluttet":
-                    return row['Utbytte'] + row['Handelsresultat']
-                return np.nan # Ikke vis total for åpne posisjoner (forvirrende)
+                if row['Status'] == "🔴 Avsluttet": return row['Utbytte'] + row['Handelsresultat']
+                return np.nan
 
-            if filter_year == "Alle år":
-                merged['Total (Avsluttet)'] = merged.apply(calc_total, axis=1)
-            else:
-                merged['Total (Avsluttet)'] = np.nan
+            if filter_year == "Alle år": merged['Total (Avsluttet)'] = merged.apply(calc_total, axis=1)
+            else: merged['Total (Avsluttet)'] = np.nan
 
             merged = merged.sort_values('Utbytte', ascending=False).reset_index(drop=True)
             
@@ -542,21 +553,57 @@ with tab3:
             
             with col2:
                 st.subheader("Detaljer")
-                # Tilpass kolonner basert på filter
                 cols_to_show = ['Selskap', 'Status', 'Utbytte']
-                if filter_year == "Alle år":
-                    cols_to_show += ['Handelsresultat', 'Total (Avsluttet)']
+                if filter_year == "Alle år": cols_to_show += ['Handelsresultat', 'Total (Avsluttet)']
+                st.dataframe(merged[cols_to_show].style.format({'Utbytte': '{:,.0f} kr', 'Handelsresultat': '{:,.0f} kr', 'Total (Avsluttet)': '{:,.0f} kr'}, na_rep="-"), width="stretch")
+                if filter_year == "Alle år": st.caption("* 'Handelsresultat' vises kun ved komplett historikk.")
+
+            # --- RØNTGEN-VERKTØY ---
+            st.divider()
+            st.subheader("🔍 Dykk ned i tallene")
+            selected_xray = st.selectbox("Velg selskap for å se detaljer:", merged['Selskap'].unique())
+            
+            if selected_xray:
+                target_norm_key = normalize_string(selected_xray)
+                df_divs_xray = df_divs[df_divs['NormKey'] == target_norm_key].copy()
+                df_trades_xray = pd.DataFrame()
+                if not df_raw_trades.empty:
+                    df_raw_trades['NormKey'] = df_raw_trades['Verdipapir'].apply(normalize_string)
+                    df_trades_xray = df_raw_trades[df_raw_trades['NormKey'] == target_norm_key].copy()
+
+                c_a, c_b = st.columns(2)
+                with c_a:
+                    st.write("**Utbytter (Rådata):**")
+                    st.dataframe(df_divs_xray[['Dato', 'Verdipapir', 'Beløp_Clean', 'Transaksjonstekst']].sort_values('Dato', ascending=False), width="stretch")
                 
-                st.dataframe(
-                    merged[cols_to_show].style.format({
-                        'Utbytte': '{:,.0f} kr', 
-                        'Handelsresultat': '{:,.0f} kr',
-                        'Total (Avsluttet)': '{:,.0f} kr'
-                    }, na_rep="-"), 
-                    width="stretch"
-                )
-                if filter_year == "Alle år":
-                    st.caption("* 'Handelsresultat' er Salgssum - Kjøpssum. For åpne posisjoner er dette bare netto investert beløp, ikke gevinst.")
-                
+                with c_b:
+                    st.write("**Kjøp og Salg (inkl. justeringer):**")
+                    if not df_trades_xray.empty:
+                        df_trades_xray = df_trades_xray.sort_values('Dato')
+                        
+                        # Gjetting av flow for graf
+                        # Hvis beløp < 0 -> Kjøp -> Øker antall
+                        # Hvis beløp > 0 -> Salg -> Minsker antall
+                        # MEN, noen ganger er antall 0 i manuelle justeringer.
+                        # Vi må bruke Antall-kolonnen fra filen der den finnes.
+                        # For manuell justering har vi satt antall=0 foreløpig.
+                        
+                        df_trades_xray['Flow'] = df_trades_xray.apply(lambda x: abs(x['Antall']) if x['Beløp_Clean'] < 0 else -abs(x['Antall']), axis=1)
+                        df_trades_xray['Beholdning'] = df_trades_xray['Flow'].cumsum()
+                        
+                        fig_holding = px.line(df_trades_xray, x='Dato', y='Beholdning', title="Aksjebeholdning over tid (Est.)", markers=True)
+                        st.plotly_chart(fig_holding, width="stretch")
+
+                        st.dataframe(df_trades_xray[['Dato', 'Verdipapir', 'Transaksjonstype', 'Beløp_Clean', 'Antall']].sort_values('Dato', ascending=False), width="stretch")
+                        
+                        tot_net = df_trades_xray['Beløp_Clean'].sum()
+                        st.metric("Netto Handelsresultat (Cashflow)", f"{tot_net:,.0f} kr")
+                        
+                        min_hold = df_trades_xray['Beholdning'].min()
+                        if min_hold < 0:
+                            st.error(f"⚠️ Grafen går under null ({min_hold} aksjer). Dette bekrefter at du mangler kjøpshistorikk før startdatoen.")
+                    else:
+                        st.info("Ingen kjøp/salg funnet for dette navnet.")
+
         else: st.warning("Fant ingen utbytter.")
     else: st.info("Mangler historikk.")
