@@ -250,22 +250,37 @@ def analyze_dividends(df, mapping_dict):
     df_divs.loc[df_divs['Transaksjonstype'] == 'Utbetaling aksjeutlån', 'Type'] = 'Aksjeutlån'
     df_roc['Type'] = 'Tilbakebetaling'
     df_main = pd.concat([df_divs, df_roc])
-    if df_main.empty: return pd.DataFrame()
-
-    if 'Verifikationsnummer' in df_main.columns:
-        df_main['Key'] = df_main['Verifikationsnummer'].fillna('Unknown')
-        df_tax['Key'] = df_tax['Verifikationsnummer'].fillna('Unknown')
-        tax_map = df_tax.groupby('Key')['Beløp_Clean'].sum()
-        df_main['Kildeskatt'] = df_main['Key'].map(tax_map).fillna(0.0)
-    else: df_main['Kildeskatt'] = 0.0
-
-    df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
-    df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] + df_main['Kildeskatt']
-    df_main = df_main[df_main['Netto_Mottatt'] > 0]
     
-    # BRUK MAPPINGEN
+    if df_main.empty: return pd.DataFrame()
+    
     df_main['Verdipapir'] = df_main['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
-    return df_main
+    df_main['Brutto_Beløp'] = df_main['Beløp_Clean']
+    df_main['Netto_Mottatt'] = df_main['Brutto_Beløp'] 
+    
+    return df_main[df_main['Netto_Mottatt'] > 0]
+
+def analyze_capital_gains(df_hist, mapping_dict):
+    """Beregner realisert gevinst/tap for aksjer (KJØP + SALG)."""
+    if df_hist.empty: return pd.DataFrame()
+    
+    # Filtrer på Kjøp/Salg
+    trade_types = ['KJØP', 'SALG', 'KÖP', 'SÄLJ']
+    df_trades = df_hist[df_hist['Transaksjonstype'].str.upper().isin(trade_types)].copy()
+    
+    if df_trades.empty: return pd.DataFrame()
+    
+    # Bruk mapping
+    df_trades['Verdipapir'] = df_trades['Verdipapir'].apply(lambda x: mapping_dict.get(x, x))
+    
+    # Beregn netto cashflow per aksje
+    # Normalt: KJØP er negativt, SALG er positivt i 'Beløp'.
+    # Hvis beløpene er positive for kjøp (uvanlig i Nordnet eksport), må vi snu dem.
+    # Nordnet standard: Beløp kolonnen har - for utgift, + for inntekt.
+    
+    gains = df_trades.groupby('Verdipapir')['Beløp_Clean'].sum().reset_index()
+    gains.columns = ['Verdipapir', 'Kursgevinst']
+    
+    return gains
 
 # --- HOVEDAPPLIKASJON ---
 
@@ -360,33 +375,26 @@ with tab2:
             if not st.session_state['history_df'].empty:
                 st.button("🤖 Oppdater beregning")
 
-        # --- ORDBOKEN (Kontrollpanel for alle navn) ---
+        # --- ORDBOKEN ---
         with st.expander("🔗 Koble navn / Overstyr automatikk", expanded=bool(st.session_state['orphans'])):
-            st.write("Her kan du koble 'Rare tickere' fra historikken til riktig navn.")
-            
             c1, c2, c3 = st.columns([2, 2, 1])
             with c1:
                 all_hist = sorted(st.session_state['hist_names'])
                 default_ix = 0
                 if st.session_state['orphans'] and st.session_state['orphans'][0] in all_hist:
                     default_ix = all_hist.index(st.session_state['orphans'][0])
-                
                 selected_ticker = st.selectbox("Ticker / Navn fra historikk", all_hist, index=default_ix)
-                
                 current_map = st.session_state['mapping'].get(selected_ticker, None)
-                if current_map:
-                    st.caption(f"Manuelt koblet til: **{current_map}**")
+                if current_map: st.caption(f"Manuelt koblet til: **{current_map}**")
                 else:
                     matches = auto_match_names([selected_ticker], st.session_state['port_names'])
-                    if selected_ticker in matches:
-                        st.caption(f"🤖 Automatisk koblet til: **{matches[selected_ticker]}**")
-                    else:
-                        st.caption("⚠️ Ikke koblet mot noe")
+                    if selected_ticker in matches: st.caption(f"🤖 Auto: **{matches[selected_ticker]}**")
+                    else: st.caption("⚠️ Ikke koblet")
 
             with c2:
                 suggestions = [""] + sorted(st.session_state['port_names'])
-                target_port = st.selectbox("Koble mot porteføljeaksje...", suggestions)
-                custom_text = st.text_input("...eller skriv eget navn:", value=target_port if target_port else "")
+                target_port = st.selectbox("Koble mot portefølje...", suggestions)
+                custom_text = st.text_input("...eller skriv nytt navn:", value=target_port if target_port else "")
             
             with c3:
                 st.write("")
@@ -395,14 +403,10 @@ with tab2:
                     if custom_text.strip():
                         st.session_state['mapping'][selected_ticker] = custom_text.strip()
                         st.rerun()
-                    else:
-                        st.error("Du må velge eller skrive et navn.")
 
             if st.session_state['mapping']:
                 st.write("---")
-                st.write("Dine manuelle koblinger:")
-                st.json(st.session_state['mapping'])
-                if st.button("Slett alle manuelle koblinger"):
+                if st.button("Slett alle koblinger"):
                     st.session_state['mapping'] = {}
                     st.rerun()
 
@@ -425,60 +429,98 @@ with tab2:
 
 # --- TAB 3: TOPPLISTE ---
 with tab3:
-    st.header("🏆 Toppliste: Mest innbringende aksjer")
+    st.header("🏆 Toppliste: Totalt")
     
     if not st.session_state['history_df'].empty:
         df_hist = st.session_state['history_df'].copy()
+        
+        # 1. Hent Utbytter
         df_divs = analyze_dividends(df_hist, st.session_state['mapping'])
         
+        # 2. Hent Gevinster (Capital Gains)
+        df_gains = analyze_capital_gains(df_hist, st.session_state['mapping'])
+        
         if not df_divs.empty:
-            # AUTO-NORMALISERING OG SAMMENSLÅING FOR VISNING
+            # Normaliser navn for visning
             df_divs['NormKey'] = df_divs['Verdipapir'].apply(normalize_string)
             key_to_display = {}
             for key, group in df_divs.groupby('NormKey'):
-                # Velg det lengste navnet som visningsnavn (ofte penest)
-                best_name = max(group['Verdipapir'].unique(), key=len)
-                key_to_display[key] = best_name
+                key_to_display[key] = max(group['Verdipapir'].unique(), key=len)
             df_divs['DisplayName'] = df_divs['NormKey'].map(key_to_display)
             
-            # --- NY KONSOLLIDERINGS-BOKS HER ---
-            all_display_names = sorted(df_divs['DisplayName'].unique())
+            # --- AGGREGER UTBYTTER ---
+            # Vi vil se totalt for 'Alle år' som standard for å vurdere exit
+            total_divs = df_divs.groupby('DisplayName')['Netto_Mottatt'].sum().reset_index()
+            total_divs.columns = ['Selskap', 'Utbytte']
             
-            with st.expander("🛠️ Ser du duplikater? Slå dem sammen her"):
-                c1, c2, c3 = st.columns([2, 2, 1])
-                with c1:
-                    src_name = st.selectbox("Navn som skal fjernes/flettes:", all_display_names)
-                with c2:
-                    # Fjern valgt navn fra target-listen for å unngå sirkel
-                    targets = [n for n in all_display_names if n != src_name]
-                    target_name = st.selectbox("Navn det skal legges til i:", targets)
-                with c3:
-                    st.write("")
-                    st.write("")
-                    if st.button("Slå sammen"):
-                        # Legg til i mappingen: src -> target
-                        st.session_state['mapping'][src_name] = target_name
-                        st.rerun()
-            # -----------------------------------
+            # --- AGGREGER GEVINSTER ---
+            # Mapper gevinster til samme DisplayName
+            if not df_gains.empty:
+                df_gains['NormKey'] = df_gains['Verdipapir'].apply(normalize_string)
+                df_gains['DisplayName'] = df_gains['NormKey'].map(key_to_display).fillna(df_gains['Verdipapir'])
+                total_gains = df_gains.groupby('DisplayName')['Kursgevinst'].sum().reset_index()
+                
+                # Merge
+                merged = pd.merge(total_divs, total_gains, left_on='Selskap', right_on='DisplayName', how='outer')
+                merged['Selskap'] = merged['Selskap'].fillna(merged['DisplayName'])
+                merged = merged.drop(columns=['DisplayName'])
+            else:
+                merged = total_divs
+                merged['Kursgevinst'] = 0.0
 
-            years = sorted(df_divs['År'].dropna().unique(), reverse=True)
-            filter_year = st.selectbox("Velg periode", ["Alle år"] + list(years))
+            # Fyll NaN
+            merged['Utbytte'] = merged['Utbytte'].fillna(0)
+            merged['Kursgevinst'] = merged['Kursgevinst'].fillna(0)
             
-            if filter_year != "Alle år": df_view = df_divs[df_divs['År'] == filter_year]
-            else: df_view = df_divs
+            # --- SJEKK OM EIES ---
+            current_holdings = []
+            if 'port_names' in st.session_state:
+                current_holdings = [normalize_string(x) for x in st.session_state['port_names']]
             
-            top_list = df_view.groupby('DisplayName')['Netto_Mottatt'].sum().reset_index()
-            top_list = top_list.sort_values('Netto_Mottatt', ascending=False).reset_index(drop=True)
-            top_list.columns = ['Selskap', 'Totalt Mottatt']
+            def check_status(name):
+                if normalize_string(name) in current_holdings:
+                    return "✅ Eies"
+                return "❌ Solgt ut"
             
+            merged['Status'] = merged['Selskap'].apply(check_status)
+            
+            # --- BEREGN TOTAL FOR SOLGTE ---
+            # Hvis solgt: Vis Total (Gevinst + Utbytte)
+            # Hvis eies: Vis kun Utbytte (Gevinst er urealisert og ikke beregnet her)
+            
+            merged['Totalavkastning'] = merged.apply(
+                lambda x: (x['Utbytte'] + x['Kursgevinst']) if x['Status'] == "❌ Solgt ut" else np.nan, 
+                axis=1
+            )
+            
+            # Sortering
+            merged = merged.sort_values('Utbytte', ascending=False).reset_index(drop=True)
+            
+            # --- VISNING ---
+            
+            # Graf (Kun utbytte for sammenligning)
             col1, col2 = st.columns([2, 1])
             with col1:
-                st.subheader("Grafisk oversikt")
-                fig = px.bar(top_list.head(20), x='Totalt Mottatt', y='Selskap', orientation='h', title=f"Topp 20 ({filter_year})", text_auto='.2s')
+                st.subheader("Utbytte-kongene (Alle år)")
+                fig = px.bar(merged.head(20), x='Utbytte', y='Selskap', color='Status', orientation='h', 
+                             title="Topp 20 Utbytte", text_auto='.2s',
+                             color_discrete_map={"✅ Eies": "#00CC96", "❌ Solgt ut": "#EF553B"})
                 fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
                 st.plotly_chart(fig, width="stretch")
+            
             with col2:
-                st.subheader("Tabell")
-                st.dataframe(top_list.style.format({'Totalt Mottatt': '{:,.0f} kr'}), width="stretch")
+                st.subheader("Detaljer")
+                # Formater tabellen
+                display_cols = ['Selskap', 'Status', 'Utbytte', 'Kursgevinst', 'Totalavkastning']
+                st.dataframe(
+                    merged[display_cols].style.format({
+                        'Utbytte': '{:,.0f} kr', 
+                        'Kursgevinst': '{:,.0f} kr',
+                        'Totalavkastning': '{:,.0f} kr'
+                    }, na_rep="-"), 
+                    width="stretch"
+                )
+                st.caption("* Kursgevinst og Totalavkastning vises kun for realiserte (solgte) posisjoner.")
+                
         else: st.warning("Fant ingen utbytter.")
     else: st.info("Mangler historikk.")
