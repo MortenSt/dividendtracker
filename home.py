@@ -92,7 +92,16 @@ def process_transactions(df):
 
 def process_portfolio(df):
     df.columns = df.columns.str.strip()
-    if 'Verdipapir' not in df.columns and 'Navn' in df.columns: df['Verdipapir'] = df['Navn']
+    # Normaliser kolonnenavn (Nordnet eksporterer 'siste kurs' med liten forbokstav)
+    rename_cols = {c: 'Siste kurs' for c in df.columns if c.lower() == 'siste kurs'}
+    if rename_cols:
+        df = df.rename(columns=rename_cols)
+    # Nordnets beholdningstabell bruker 'Handel', andre eksporter bruker 'Navn'
+    if 'Verdipapir' not in df.columns:
+        for candidate in ['Navn', 'Handel']:
+            if candidate in df.columns:
+                df['Verdipapir'] = df[candidate]
+                break
     
     if 'GAV' not in df.columns and 'Kostpris' in df.columns:
         df['GAV'] = df['Kostpris']
